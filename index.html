@@ -185,6 +185,7 @@ progress::-webkit-progress-value{background:var(--accent); border-radius:3px;}
         <div class="card" style="flex:1; display:flex; flex-direction:column;">
           <h3>背包宝图识别结果（4×5）</h3>
           <div class="bt-grid" id="bt-grid"></div>
+          <div id="dpi-warn" style="display:none; margin-top:8px; padding:8px 10px; background:#3a2410; border:1px solid #b45309; border-radius:6px; color:#fbbf24; font-size:12px; line-height:1.5;">⚠️ 检测到显示缩放变化，系统光标可能混入画面、识别可能失准。请重新点击「开始共享屏幕」。</div>
           <div id="bt-status" style="margin-top:8px;">等待共享屏幕…</div>
         </div>
         <div class="card">
@@ -248,8 +249,10 @@ const state = {
     tooltipImg:null, tooltipData:null, tooltipW:628, tooltipH:340,
     cursorCell:-1, lastReadCell:-1, readPending:0, reading:false, readSessionCell:-1,
     sortOrder:[], loopTimer:null, loopCount:0, lastScale:null, _lastTip:null, clusters:null,
+    ready:false,          // 藏宝图资源（宝图图标等）是否加载完成；未完成前 baotuLoop 不运行
   }
 };
+let shareDpr = 1;         // 共享时的 devicePixelRatio，用于检测共享过程中 DPI 变化
 
 /* ===================== DOM ===================== */
 const $ = id => document.getElementById(id);
@@ -331,6 +334,7 @@ async function loadBaotuRefs(){
   state.bt.tooltipW=tipImg.naturalWidth; state.bt.tooltipH=tipImg.naturalHeight;
   state.bt.tooltipImg=tipImg;
   const tc=imgToData(tipImg); state.bt.tooltipData=tc.data;
+  state.bt.ready=true;   // 资源加载完成，允许 baotuLoop 运行
 }
 
 /* ===================== 屏幕共享 ===================== */
@@ -339,11 +343,15 @@ async function startShare(){
     // 检测系统显示缩放（DPI）：devicePixelRatio = 物理像素/逻辑像素，近似 Windows「更改文本、应用等项目的大小」比例
     // 100%=1.0，125%=1.25，150%=1.5，200%=2.0。用于提示用户，并作为图标缩放比例的参考初始值。
     state.dprScale = window.devicePixelRatio || 1;
+    shareDpr = state.dprScale;   // 记录共享时的 DPI，用于检测共享过程中的缩放变化
     // 请求更高清晰度：显式给分辨率约束（屏幕共享分辨率由系统决定，但理想值可引导浏览器选高分辨率轨道）
     const stream=await navigator.mediaDevices.getDisplayMedia({ video:{ frameRate:{ideal:30, max:30}, width:{ideal:1920, max:3840}, height:{ideal:1080, max:2160}, cursor:'never' }, audio:false });
     state.stream=stream; video.srcObject=stream;
     if(video.readyState<2){ await new Promise(res=>{ video.onloadedmetadata=res; }); }
     await video.play();
+    // 重新共享：重置定位缓存，从全帧扫描重新定位（避免沿用旧窗口位置/缩放导致的 region 失效）
+    state.bt.grid=null; state.bt.lastScale=null; state.bt.iconPositions=[]; state.bt.clusters=null; state.bt._lastVW=0;
+    state.bt.hasMap.fill(false);
     state.streaming=true;
     $('stream-badge').textContent='共享中'; $('stream-badge').classList.add('on');
     $('btn-share').disabled=true; $('btn-stop').disabled=false; $('btn-recognize').disabled=false;
@@ -354,9 +362,11 @@ async function startShare(){
 function stopShare(){
   if(state.stream){ state.stream.getTracks().forEach(t=>t.stop()); }
   state.stream=null; state.streaming=false;
+  state.bt._lastVW=0; shareDpr=1;
   $('stream-badge').textContent='未共享'; $('stream-badge').classList.remove('on');
   $('btn-share').disabled=false; $('btn-stop').disabled=true; $('btn-recognize').disabled=true;
   $('hint').style.display='';
+  const dw=$('dpi-warn'); if(dw) dw.style.display='none';
 }
 
 /* ===================== OCR ===================== */
@@ -710,7 +720,7 @@ function findIconsAtScale(frame, scale, region){
     rgn={ x0:Math.max(0,region.x0)*SC, y0:Math.max(0,region.y0)*SC,
           x1:Math.min(frame.width,region.x1)*SC, y1:Math.min(frame.height,region.y1)*SC };
   }
-  const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.45,3,rgn);
+  const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.40,3,rgn);
   const coarse=nmsMatches(ms, baseW*0.6*SC, baseH*0.6*SC).slice(0,25).map(m=>({x:Math.round(m.x/SC), y:Math.round(m.y/SC)}));
   if(!coarse.length) return {positions:[], iconW:baseW, iconH:baseH};
   // 图标尺寸直接用 scale 推导（NCC 匹配的 scale 是可靠信号），绝不用格子间距 gx 反推。
@@ -785,6 +795,11 @@ function findIconPositions(frame){
       state.bt.lastScale = scale;
     }
     found = findIconsAtScale(frame, scale, region);
+    // 关键修复：region 可能已失效（背包/游戏窗口移动到旧区域外、或共享过程中 DPI 变化导致画面整体缩放平移），
+    // 此时即使 scale 正确，限制在旧 region 内也扫不到图标。回退到全帧扫描重试一次。
+    if(found.positions.length < 3 && region){
+      found = findIconsAtScale(frame, scale, null);
+    }
   } else {
     state.bt.lastScale = scale;
   }
@@ -1295,12 +1310,24 @@ async function baotuLoop(){
   if(!state.streaming||state.activeTab!=='baotu') return;
   if(state.bt.looping) return; state.bt.looping=true;
   try{
+    if(!state.bt.ready){ $('bt-status').textContent='藏宝图资源加载中…'; return; }
     const frame=getFrame(); if(!frame) return;
     state.bt.loopCount++;
+    // 检测共享过程中 DPI/分辨率变化：getDisplayMedia 的 cursor:'never' 在 Windows 缩放变化后可能失效，
+    // 且视频流分辨率会变。检测到变化就提示重新共享（避免系统光标混入 + 保证定位准确）。
+    const curDpr = window.devicePixelRatio || 1;
+    if(Math.abs(curDpr - shareDpr) > 0.01 || Math.abs(frame.width - state.bt._lastVW) > 2){
+      if(state.bt._lastVW && Math.abs(frame.width - state.bt._lastVW) > 2){
+        $('dpi-warn').style.display='block';
+        $('bt-status').textContent='⚠️ 检测到显示缩放/分辨率变化，识别可能失准且系统光标可能混入，请重新点击「开始共享屏幕」';
+      }
+      state.dprScale = curDpr;
+    }
+    state.bt._lastVW = frame.width;
     // 1. 每轮定位网格（用缓存 scale 快速定位，背包移动/缩放实时跟随）
     const g=autoLocateGrid(frame);
     if(g && g.w>40 && g.h>40){ state.bt.grid=g; }
-    if(!state.bt.grid){ $('bt-status').textContent='未定位到背包格子，请把背包界面完整显示在屏幕中'; return; }
+    if(!state.bt.grid){ $('bt-status').textContent='未定位到背包格子，请把背包界面完整显示在屏幕中（视频 '+frame.width+'x'+frame.height+'）'; return; }
     // 2. 检测宝图
     const cnt=detectMaps(frame);
     // 3. 检测绿色坐标文字（tooltip 的坐标行，出现在被悬停宝图下方）；降频省 CPU
@@ -1336,7 +1363,8 @@ async function baotuLoop(){
     const readCnt=state.bt.coords.filter(Boolean).length;
     const tipTxt = (cr&&cr.coord) ? ('读取到坐标 '+cr.coord.name+'('+cr.coord.x+','+cr.coord.y+')'+(cell>=0?('，映射第 '+(Math.floor(cell/5)+1)+' 行 '+(cell%5+1)+' 列'):'')) : '未检测到坐标（悬停宝图等待坐标行显示）';
     const dpiTxt = state.dprScale && state.dprScale!==1 ? ('显示缩放 '+Math.round(state.dprScale*100)+'%') : '';
-    $('bt-status').textContent='已识别宝图 '+cnt+' 张，已录入坐标 '+readCnt+' 个；'+tipTxt+(dpiTxt?('；'+dpiTxt):'');
+    const diagTxt = '（视频 '+frame.width+'x'+frame.height+'，图标 '+state.bt.iconPositions.length+' 个，scale '+Math.round((state.bt.lastScale||1)*100)+'%）';
+    $('bt-status').textContent='已识别宝图 '+cnt+' 张，已录入坐标 '+readCnt+' 个；'+tipTxt+(dpiTxt?('；'+dpiTxt):'')+diagTxt;
   }catch(e){ /* 忽略单次错误 */ }
   finally{ state.bt.looping=false; }
 }
@@ -1355,7 +1383,8 @@ async function boot(){
   const bankProgress=$('bank-progress'); $('ocr-status').textContent='正在加载题库（'+bank.length+' 个图标）…';
   buildDictionary(); await buildTemplates(p=>{ bankProgress.value=p; });
   $('ocr-status').textContent='题库已加载：'+bank.length+' 个图标，'+state.dictionary.length+' 个技能名';
-  loadBaotuRefs().catch(()=>{});
+  // 等待藏宝图资源（宝图图标等）加载完成，再启动实时循环——避免循环首轮因 iconImg 未就绪而定位失败
+  await loadBaotuRefs().catch(()=>{ state.bt.ready=true; });
   renderBtGrid(); initOCR(); render();
   // 藏宝图实时循环
   setInterval(baotuLoop, 900);
