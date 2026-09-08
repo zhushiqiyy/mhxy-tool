@@ -232,6 +232,7 @@ const state = {
   streaming:false, stream:null, activeTab:'jieri',
   autoMode:false, editMode:true, recognizing:false,
   ocrReady:false, ocrWorker:null,
+  dprScale:1,            // 系统显示缩放（devicePixelRatio 近似，如 2.0 = 200%）
   templates:[], dictionary:[],
   regions: loadRegions(),
   lastAnswer:null, lastIconHash:'',
@@ -334,7 +335,11 @@ async function loadBaotuRefs(){
 /* ===================== 屏幕共享 ===================== */
 async function startShare(){
   try{
-    const stream=await navigator.mediaDevices.getDisplayMedia({ video:{ frameRate:{ideal:30}, cursor:'never' }, audio:false });
+    // 检测系统显示缩放（DPI）：devicePixelRatio = 物理像素/逻辑像素，近似 Windows「更改文本、应用等项目的大小」比例
+    // 100%=1.0，125%=1.25，150%=1.5，200%=2.0。用于提示用户，并作为图标缩放比例的参考初始值。
+    state.dprScale = window.devicePixelRatio || 1;
+    // 请求更高清晰度：显式给分辨率约束（屏幕共享分辨率由系统决定，但理想值可引导浏览器选高分辨率轨道）
+    const stream=await navigator.mediaDevices.getDisplayMedia({ video:{ frameRate:{ideal:30, max:30}, width:{ideal:1920, max:3840}, height:{ideal:1080, max:2160}, cursor:'never' }, audio:false });
     state.stream=stream; video.srcObject=stream;
     if(video.readyState<2){ await new Promise(res=>{ video.onloadedmetadata=res; }); }
     await video.play();
@@ -647,14 +652,11 @@ function findIconsAtScale(frame, scale){
   const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.4,3);
   const coarse=nmsMatches(ms, baseW*0.6*SC, baseH*0.6*SC).slice(0,25).map(m=>({x:Math.round(m.x/SC), y:Math.round(m.y/SC)}));
   if(!coarse.length) return {positions:[], iconW:baseW, iconH:baseH};
-  const ccx=coarse.map(p=>p.x+baseW*scale/2).sort((a,b)=>a-b);
-  const ccy=coarse.map(p=>p.y+baseH*scale/2).sort((a,b)=>a-b);
-  const gx=medianGap(cluster1d(ccx, baseW*scale*0.4)), gy=medianGap(cluster1d(ccy, baseH*scale*0.4));
-  // 格子是正方形（102×102），gx=gy。用更可靠的 gx 推导图标宽高，避免 gy 因降采样抖动算错导致 iconH 异常
-  let iconW=(gx&&gx>0)?Math.round(gx*98/102):Math.round(baseW*scale);
-  let iconH=(gy&&gy>0&&Math.abs(gy-gx)<gx*0.5)?Math.round(gy*100/102):Math.round(iconW*100/98);
-  if(iconW<8||iconW>300) iconW=Math.round(baseW*scale);
-  if(iconH<8||iconH>300) iconH=Math.round(iconW*100/98);
+  // 图标尺寸直接用 scale 推导（NCC 匹配的 scale 是可靠信号），绝不用格子间距 gx 反推。
+  // 旧代码用 gx*98/102 反推，隐含「格子/图标≈1.04」假设——但「道具行囊」等标签页格子远大于图标
+  // （实测运行6：格子间距146、图标68，比例2.15），反推会把 iconW 算成140（实际68），导致网格整体错位。
+  const iconW=Math.round(baseW*scale);
+  const iconH=Math.round(baseH*scale);
   return {positions:coarse, iconW, iconH};
 }
 function findIconPositions(frame){
@@ -678,11 +680,6 @@ function findIconPositions(frame){
     }
     // 过滤主簇内的离群点（低阈值引入的误检噪声，离簇质心过远）
     found.positions = filterOutliers(found.positions, found.iconW);
-    // 用主簇重新计算 iconW/iconH（簇内间距更准确）
-    const ccx=found.positions.map(p=>p.x+found.iconW/2).sort((a,b)=>a-b);
-    const ccy=found.positions.map(p=>p.y+found.iconH/2).sort((a,b)=>a-b);
-    const gx=medianGap(cluster1d(ccx, found.iconW*0.4));
-    if(gx&&gx>0){ found.iconW=Math.round(gx*98/102); found.iconH=Math.round(found.iconW*100/98); }
   }
   return {positions:found.positions, iconW:found.iconW, iconH:found.iconH, scale};
 }
@@ -763,13 +760,13 @@ function inferGrid(found, frame){
   if(!positions.length) return null;
   const cx = positions.map(p=>p.x+iconW/2).sort((a,b)=>a-b);
   const cy = positions.map(p=>p.y+iconH/2).sort((a,b)=>a-b);
-  // 聚类为不同列/行，再求格子间距（格子≈图标×比例：宽102/98，高102/100）
-  const cols = cluster1d(cx, iconW*0.4), rows = cluster1d(cy, iconH*0.4);
-  let gx = medianGap(cols) || iconW*102/98;
-  let gy = medianGap(rows) || gx; // 单行/单列时格子为正方形，gy=gx
-  if(gx<iconW*0.6||gx>iconW*1.8) gx=iconW*102/98;
-  // 格子正方形（gx=gy）：gy 与 gx 差异过大（降采样抖动/行数不足）时，用 gx 兜底
-  if(gy<iconH*0.6||gy>iconH*1.8||Math.abs(gy-gx)>gx*0.4) gy=gx;
+  // 聚类为不同列/行，再求格子间距。格子间距独立于图标尺寸（「道具行囊」等标签页格子远大于图标，比例可到 2 以上）
+  const cols = cluster1d(cx, iconW*0.5), rows = cluster1d(cy, iconH*0.5);
+  // 用「最长等间距序列」求格子间距（比中位数更抗误检：误检图标会把间距拆成两半，中位数会被污染）
+  let gx = bestGap(cols, iconW*0.8, iconW*3.0);
+  let gy = bestGap(rows, iconH*0.8, iconH*3.0);
+  if(!gx) gx=iconW*102/98;
+  if(!gy || Math.abs(gy-gx)>gx*0.4) gy=gx;
 
   // 方案1（优先）：图标共识（≥2行且≥2列）——图标是 NCC 匹配的最可靠信号，不依赖边框（图标密集时横线被遮挡）
   if(positions.length>=4 && cols.length>=2 && rows.length>=2){
@@ -819,6 +816,25 @@ function consensus(vals, gap){
 }
 function cluster1d(vals, tol){ const arr=[]; for(const v of vals){ if(arr.length&&v-arr[arr.length-1]<=tol){ arr[arr.length-1]=(arr[arr.length-1]+v)/2; } else arr.push(v); } return arr; }
 function medianGap(vals){ if(vals.length<2) return null; const gaps=[]; for(let i=1;i<vals.length;i++) gaps.push(vals[i]-vals[i-1]); gaps.sort((a,b)=>a-b); return gaps[Math.floor(gaps.length/2)]; }
+/* 从一维坐标中找「最长等间距序列」的间距（比中位数抗误检：误检点会把间距拆成两半，中位数被污染）。
+   例如 cols=[350,496,570,643]（146 被误检 570 拆成 74+72），bestGap 找到 146（350→496→643 三连），而非中位数 74。 */
+function bestGap(vals, minGap, maxGap){
+  const uniq=[...new Set(vals)].sort((a,b)=>a-b);
+  if(uniq.length<2) return null;
+  const set=new Set(uniq.map(v=>Math.round(v)));
+  let bestGap=null, bestLen=0;
+  for(let i=0;i<uniq.length;i++){
+    for(let j=i+1;j<uniq.length;j++){
+      const gap=uniq[j]-uniq[i];
+      if(gap<minGap||gap>maxGap) continue;
+      // 数这个间距能连成多长的等间距序列
+      let len=0, cur=Math.round(uniq[i]);
+      while(set.has(cur)){ len++; cur=Math.round(cur+gap); }
+      if(len>bestLen){ bestLen=len; bestGap=gap; }
+    }
+  }
+  return bestGap;
+}
 function detectBorder(frame, region){
   // 只用蓝灰色检测网格线（斜面边框的亮色边 RGB 83,99,136 = BGR 136,99,83，干净可靠；紫色过于杂乱不可用）
   // 性能：region 内用 0.5 降采样统计（去掉 sqrt，用平方距离），再回到全分辨率精修峰值 ±4px（像素级精度）
@@ -1073,11 +1089,14 @@ async function readFromRegion(frame, x0, y0, w, h){
   const crop=document.createElement('canvas'); crop.width=w; crop.height=h;
   const cg=crop.getContext('2d',{willReadFrequently:true}); cg.drawImage(frame,x0,y0,w,h,0,0,w,h);
   const d=cg.getImageData(0,0,w,h).data;
-  // 检测绿色像素（G 为最大通道且 G>60，覆盖亮绿/黄绿/暗绿），按 y 聚类成行
+  // 检测绿色像素：G 明显大于 R 和 B（高饱和度绿），按 y 聚类成行。
+  // 关键：藏宝图坐标是纯绿(0,255,0)或暗绿(101,161,51)，而 tooltip 里其他物品文字是淡蓝(125,211,252)、
+  // 文字阴影是灰绿(31,66,64，g≈b)。旧条件 g>b 无法区分灰绿阴影（66>64），会误读淡蓝/阴影文字（运行6 误读"腔咏旺匀"）。
+  // 新条件 g>r*1.25 && g>b*1.25 同时排除灰绿阴影(g≈b)和淡蓝(b主导)。
   const rows=[];
   for(let i=0;i<w*h;i++){
     const r=d[i*4], g=d[i*4+1], b=d[i*4+2];
-    if(g>60 && g>=r && g>b){
+    if(g>50 && g>r*1.25 && g>b*1.25){
       const x=i%w, y=(i/w)|0;
       let found=-1;
       for(let j=0;j<rows.length;j++){ const R=rows[j]; if(y>=R.minY-10 && y<=R.maxY+10){ found=j; break; } }
@@ -1191,7 +1210,8 @@ async function baotuLoop(){
     // 状态
     const readCnt=state.bt.coords.filter(Boolean).length;
     const tipTxt = (cr&&cr.coord) ? ('读取到坐标 '+cr.coord.name+'('+cr.coord.x+','+cr.coord.y+')'+(cell>=0?('，映射第 '+(Math.floor(cell/5)+1)+' 行 '+(cell%5+1)+' 列'):'')) : '未检测到坐标（悬停宝图等待坐标行显示）';
-    $('bt-status').textContent='已识别宝图 '+cnt+' 张，已录入坐标 '+readCnt+' 个；'+tipTxt;
+    const dpiTxt = state.dprScale && state.dprScale!==1 ? ('显示缩放 '+Math.round(state.dprScale*100)+'%') : '';
+    $('bt-status').textContent='已识别宝图 '+cnt+' 张，已录入坐标 '+readCnt+' 个；'+tipTxt+(dpiTxt?('；'+dpiTxt):'');
   }catch(e){ /* 忽略单次错误 */ }
   finally{ state.bt.looping=false; }
 }
