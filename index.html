@@ -251,6 +251,10 @@ const state = {
     tooltipImg:null, tooltipData:null, tooltipW:628, tooltipH:340,
     cursorCell:-1, lastReadCell:-1, readPending:0, reading:false, readSessionCell:-1,
     sortOrder:[], loopTimer:null, loopCount:0, lastScale:null, _lastTip:null, clusters:null,
+    scaleStable:0,        // scale 连续稳定计数（≥3 即锁定，避免 detectScale 反复重扫导致网格漂移/卡顿）
+    _lastCoordKey:'',     // 上次录入坐标的 key（格子+地名+坐标），用于坐标锁定（同一坐标不重复 OCR）
+    _coordVote:null,      // 坐标防抖投票 {key,count}：连续 2 次读到相同坐标才录入
+    _refineTick:0,        // refineIcons 降频计数（每 2 轮做一次全分辨率精修）
     ready:false,          // 藏宝图资源（宝图图标等）是否加载完成；未完成前 baotuLoop 不运行
   }
 };
@@ -907,9 +911,16 @@ function findIconsAtScale(frame, scale, region){
   // 图标尺寸直接用 scale 推导（NCC 匹配的 scale 是可靠信号），绝不用格子间距 gx 反推。
   const iconW=Math.round(baseW*scale);
   const iconH=Math.round(baseH*scale);
-  // 全分辨率精修：消除降采样粗定位误差（网格原点偏移的主因之一）
-  const refined = refineIcons(frame, coarse, iconW, iconH, region);
-  return {positions:refined, iconW, iconH};
+  // 全分辨率精修：每 2 轮做一次（网格位置由 inferGrid 的蓝灰线确定，±2px 精修对定位影响小，
+  // 降频可省掉每轮的全分辨率 getImageData + 逐图标 NCC，是主要卡顿来源之一）
+  state.bt._refineTick++;
+  let positions;
+  if(state.bt._refineTick % 2 === 1){
+    positions = refineIcons(frame, coarse, iconW, iconH, region);
+  }else{
+    positions = coarse;
+  }
+  return {positions, iconW, iconH};
 }
 /* 全分辨率精修图标位置：对每个粗图标在 ±2px 内做 NCC 精搜，并过滤低分误检。region 内读取像素（大幅减少 getImageData 开销） */
 function refineIcons(frame, coarse, iconW, iconH, region){
@@ -965,24 +976,32 @@ function findIconPositions(frame){
   }
   // 优先用缓存 scale 快速定位
   let scale = state.bt.lastScale || 1;
+  const scaleLocked = state.bt.scaleStable >= 3;   // scale 已锁定（图标充足且稳定 3 轮）
   let found = findIconsAtScale(frame, scale, region);
-  // 图标太少（<3）才重扫比例；重扫后若与缓存接近（±0.2）保持缓存，避免离散档位跳变导致网格忽大忽小
-  if(found.positions.length < 3){
-    const newScale = detectScale(frame);
-    if(state.bt.lastScale && Math.abs(newScale - state.bt.lastScale) < 0.2){
-      scale = state.bt.lastScale;
-    } else {
-      scale = newScale;
-      state.bt.lastScale = scale;
-    }
-    found = findIconsAtScale(frame, scale, region);
-    // 关键修复：region 可能已失效（背包/游戏窗口移动到旧区域外、或共享过程中 DPI 变化导致画面整体缩放平移），
-    // 此时即使 scale 正确，限制在旧 region 内也扫不到图标。回退到全帧扫描重试一次。
-    if(found.positions.length < 3 && region){
+  if(found.positions.length >= 5){
+    // 图标充足：scale 稳定计数递增，达到 3 后锁定。锁定后不再 detectScale（23 档全帧扫描很重，且会因帧间抖动选到相邻档位导致网格漂移）
+    state.bt.lastScale = scale;
+    if(state.bt.scaleStable < 3) state.bt.scaleStable++;
+  } else if(!scaleLocked){
+    // 图标不足且未锁定：region 可能失效，先回退全帧；仍不足才 detectScale 重扫
+    if(region && found.positions.length < 3){
       found = findIconsAtScale(frame, scale, null);
     }
-  } else {
-    state.bt.lastScale = scale;
+    if(found.positions.length < 3){
+      const newScale = detectScale(frame);
+      // 与缓存接近（±0.2）保持缓存，避免离散档位跳变导致网格忽大忽小
+      if(state.bt.lastScale && Math.abs(newScale - state.bt.lastScale) < 0.2){
+        scale = state.bt.lastScale;
+      } else {
+        scale = newScale;
+        state.bt.lastScale = scale;
+      }
+      state.bt.scaleStable = 0;   // scale 变化，重置稳定计数
+      found = findIconsAtScale(frame, scale, region);
+      if(found.positions.length < 3 && region){
+        found = findIconsAtScale(frame, scale, null);
+      }
+    }
   }
   // 双开/多窗口：图标可能来自多个背包，按空间聚簇。保存所有簇，主簇先取最大簇
   state.bt.clusters=null;
@@ -1351,7 +1370,10 @@ function parseCoord(text){
   }
   return null;
 }
-/* 从「(」或「,」或数字前取最近的地名（2-5 汉字），优先匹配地名字典（含前导字唯一/包含/首字） */
+/* 从「(」或「,」或数字前取最近的地名（2-5 汉字），优先匹配地名字典（含前导字唯一/包含/首字）。
+   关键修复：不再兜底接受「非地图名」的汉字——旧逻辑在字典匹配失败时返回原样字符串，
+   导致游戏里 NPC 名（如「本因及时(113,6)」）被误当成宝图坐标地名，识别出乱七八糟内容。
+   现在：只有能匹配到 40 个地图名之一才返回地名，否则返回空（parseCoord 会据此拒绝）。 */
 function nameBeforeBracket(t, idx){
   for(let len=5;len>=2;len--){
     const start=Math.max(0, idx-len);
@@ -1360,8 +1382,7 @@ function nameBeforeBracket(t, idx){
     const corrected=correctMapName(frag);
     if(MAP_NAMES.includes(corrected)) return corrected;
   }
-  const frag=t.slice(Math.max(0,idx-4), idx).match(/([\u4e00-\u9fa5]{2,4})$/);
-  return frag?correctMapName(frag[1]):'';
+  return '';
 }
 /* 坐标数字智能拆分：OCR 丢逗号时，把连续 4-6 位数字拆成 x,y（均 ≤999 且不含前导 0） */
 function splitCoordNumber(numStr){
@@ -1447,18 +1468,19 @@ async function readFromRegion(frame, x0, y0, w, h){
   }
   return null;
 }
-/* 在网格附近（下方/周边）搜绿色坐标文字，返回 {coord, cx, cy}（坐标文字中心，用于反推被悬停格子） */
+/* 在网格下方搜绿色坐标文字，返回 {coord, cx, cy}（坐标文字中心，用于反推被悬停格子）。
+   关键修复：取消「全屏兜底」——全屏搜绿色会读到游戏场景里海量非宝图坐标的绿色文字
+   （NPC 名、任务追踪、聊天、血条、以及用户共享整个屏幕时工具自身的绿色标注框），
+   是「识别出乱七八糟内容」的根源。tooltip（藏宝图信息框）出现在被悬停宝图下方，
+   坐标行在 tooltip 内，因此只读「网格区域 + 下方 1.2 倍高度」的紧邻范围。 */
 async function readCoordinate(frame){
   const g=state.bt.grid;
-  // 优先网格附近（tooltip 出现在被悬停宝图下方）
-  if(g){
-    const r=await readFromRegion(frame,
-      Math.max(0, Math.round(g.x - g.w*0.5)), Math.max(0, Math.round(g.y - g.h*0.6)),
-      Math.round(g.w*2.0), Math.round(g.h*2.8));
-    if(r) return r;
-  }
-  // 全屏兜底（双开时网格可能定位到另一个背包，但坐标在被操作的背包附近）
-  return await readFromRegion(frame, 0, 0, frame.width, frame.height);
+  if(!g) return null;
+  const x0=Math.max(0, Math.round(g.x - g.w*0.3));
+  const y0=Math.max(0, Math.round(g.y));
+  const w=Math.min(frame.width-x0, Math.round(g.w*1.6));
+  const h=Math.min(frame.height-y0, Math.round(g.h*2.2));
+  return await readFromRegion(frame, x0, y0, w, h);
 }
 
 /* ===================== 藏宝图：渲染 + 排序 ===================== */
@@ -1515,33 +1537,38 @@ async function baotuLoop(){
     if(!state.bt.grid){ $('bt-status').textContent='未定位到背包格子，请把背包界面完整显示在屏幕中（视频 '+frame.width+'x'+frame.height+'）'; return; }
     // 2. 检测宝图
     const cnt=detectMaps(frame);
-    // 3. 检测绿色坐标文字（tooltip 的坐标行，出现在被悬停宝图下方）；降频省 CPU
-    //    不再依赖 tooltip 模板匹配（模板在 tooltip 未完整弹出时分数低、易漏检）
-    let cr=state.bt._lastCoordResult||null;
-    if(state.bt.loopCount%2===1 && !state.bt.reading){
+    // 3. 坐标读取：降频（每 3 轮 ~4.5s）且「仍有宝图未读坐标」才读（全部读完即停止，避免反复 OCR 卡顿）
+    //    坐标只从网格下方紧邻区域读（readCoordinate 内已取消全屏兜底），配合地名字典严格匹配，杜绝误读游戏其他绿色文字
+    let cr=null;
+    const unreadMap = state.bt.hasMap.some((h,i)=> h && !state.bt.coords[i]);
+    if(unreadMap && state.bt.loopCount%3===1 && !state.bt.reading){
+      state.bt.reading=true;
       cr=await readCoordinate(frame);
-      state.bt._lastCoordResult=cr;
+      state.bt.reading=false;
     }
-    // 4. 读到坐标 → 反推被悬停宝图格子 → 录入（持久保留，下次悬停更新）
+    // 4. 坐标录入（防抖 + 锁定）：连续 2 次读到相同坐标才录入（过滤单次误读），
+    //    同一格子已是相同坐标则跳过（锁定，避免「不断更新」）
     let cell=-1;
     if(cr && cr.coord){
-      // 双开：坐标在被操作的背包附近，若当前主簇不是它，则切换到坐标所属的簇重新定位
-      const targetCl=clusterAtCoord(cr.cx, cr.cy);
-      if(targetCl && targetCl!==state.bt.iconPositions && targetCl.length>=2){
-        state.bt.iconPositions=targetCl;
-        const iw=state.bt.iconWActual||98;
-        const ccx=targetCl.map(p=>p.x+iw/2).sort((a,b)=>a-b);
-        const gx2=medianGap(cluster1d(ccx, iw*0.4));
-        if(gx2&&gx2>0){ state.bt.iconWActual=Math.round(gx2*98/102); state.bt.iconHActual=Math.round(state.bt.iconWActual*100/98); }
-        const g2=inferGrid({positions:targetCl, iconW:state.bt.iconWActual, iconH:state.bt.iconHActual}, frame);
-        if(g2&&g2.w>40){ state.bt.grid=g2; }
-      }
       cell=coordToCell(cr.cx, cr.cy);
       if(cell>=0 && state.bt.hasMap[cell]){
-        if(!state.bt.coords[cell] || state.bt.coords[cell].x!==cr.coord.x || state.bt.coords[cell].y!==cr.coord.y || state.bt.coords[cell].name!==cr.coord.name){
-          state.bt.coords[cell]=cr.coord; renderBtGrid();
+        const key=cell+'|'+cr.coord.name+'|'+cr.coord.x+','+cr.coord.y;
+        if(state.bt._coordVote && state.bt._coordVote.key===key){
+          if(++state.bt._coordVote.count>=2){
+            const ex=state.bt.coords[cell];
+            if(!ex || ex.x!==cr.coord.x || ex.y!==cr.coord.y || ex.name!==cr.coord.name){
+              state.bt.coords[cell]=cr.coord; renderBtGrid();
+            }
+            state.bt._coordVote=null;
+          }
+        }else{
+          state.bt._coordVote={key,count:1};
         }
+      }else{
+        state.bt._coordVote=null;
       }
+    }else{
+      state.bt._coordVote=null;
     }
     state.bt.cursorCell=cell;
     // 状态
@@ -1572,8 +1599,8 @@ async function boot(){
   // 等待藏宝图资源（宝图图标等）加载完成，再启动实时循环——避免循环首轮因 iconImg 未就绪而定位失败
   await loadBaotuRefs().catch(()=>{ state.bt.ready=true; });
   renderBtGrid(); initOCR(); render();
-  // 藏宝图实时循环
-  setInterval(baotuLoop, 900);
+  // 藏宝图实时循环：1500ms 一轮（原 900ms 过密，每轮做降采样扫描+精修+OCR，累计计算量远超间隔导致主线程堆积卡顿）
+  setInterval(baotuLoop, 1500);
 }
 boot();
 })();
