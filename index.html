@@ -272,9 +272,9 @@ $('sidebar-jieri').style.display = 'flex';
 /* ===================== 区域（教师节） ===================== */
 function defaultRegions(){
   return {
-    // 看图说话图标居中偏上，4 个选项 2×2 在下方（按游戏答题界面实际布局）
-    icon:{x:0.32,y:0.40,w:0.36,h:0.20}, opt1:{x:0.22,y:0.62,w:0.26,h:0.12},
-    opt2:{x:0.54,y:0.62,w:0.26,h:0.12}, opt3:{x:0.22,y:0.76,w:0.26,h:0.12}, opt4:{x:0.54,y:0.76,w:0.26,h:0.12},
+    // 看图说话图标居中偏上；4 个选项 2×2 在下方（区域缩小，精确框住技能名文字，减少边框/背景干扰 OCR）
+    icon:{x:0.32,y:0.42,w:0.36,h:0.16}, opt1:{x:0.30,y:0.58,w:0.16,h:0.06},
+    opt2:{x:0.54,y:0.58,w:0.16,h:0.06}, opt3:{x:0.30,y:0.66,w:0.16,h:0.06}, opt4:{x:0.54,y:0.66,w:0.16,h:0.06},
   };
 }
 function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions_v2'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
@@ -502,7 +502,8 @@ function matchIcon(crop){
   const ng=norm.getContext('2d',{willReadFrequently:true}); ng.drawImage(crop,0,0,S,S); const np=ng.getImageData(0,0,S,S).data;
   let bestIdx=-1,bestScore=-2;
   for(let i=0;i<state.templates.length;i++){ const t=state.templates[i]; if(t.n<20) continue;
-    const ncc=maskedNCC(np,t); const color=histCorr(histOfCrop(np,t.mask),t.hist); const sc=0.65*ncc+0.35*color;
+    // 形状匹配为主（灰度 NCC，比较图标内部图形轮廓/明暗），颜色直方图辅助（区分同形异色如「破釜沉舟」）
+    const shape=grayNCC(np,t); const color=histCorr(histOfCrop(np,t.mask),t.hist); const sc=0.7*shape+0.3*color;
     if(sc>bestScore){ bestScore=sc; bestIdx=i; } }
   if(bestIdx<0) return {index:-1,name:'',category:'',color:'',score:-1};
   return {index:bestIdx,name:bank[bestIdx].name,category:bank[bestIdx].category,color:bank[bestIdx].color,score:bestScore};
@@ -510,6 +511,17 @@ function matchIcon(crop){
 function histOfCrop(np,mask){ const hist=new Float64Array(24); for(let p=0;p<4096;p++){ if(mask[p]){ hist[Math.min(7,np[p*4]>>5)]++; hist[8+Math.min(7,np[p*4+1]>>5)]++; hist[16+Math.min(7,np[p*4+2]>>5)]++; } } return hist; }
 function histCorr(h1,h2){ const L=h1.length; let m1=0,m2=0; for(let i=0;i<L;i++){ m1+=h1[i];m2+=h2[i]; } m1/=L;m2/=L;
   let cov=0,v1=0,v2=0; for(let i=0;i<L;i++){ const a=h1[i]-m1,b=h2[i]-m2; cov+=a*b;v1+=a*a;v2+=b*b; } if(v1<1e-9||v2<1e-9) return 0; return cov/Math.sqrt(v1*v2); }
+/* 灰度 NCC：比较图标内部图形的灰度（形状+明暗），忽略颜色，避免颜色相近但形状不同导致的误匹配 */
+function grayNCC(np,t){
+  const tp=t.data,n=t.n; if(n===0) return -1;
+  let sm=0,tm=0;
+  for(let p=0;p<4096;p++){ if(t.mask[p]){ sm+=0.299*np[p*4]+0.587*np[p*4+1]+0.114*np[p*4+2]; tm+=0.299*tp[p*4]+0.587*tp[p*4+1]+0.114*tp[p*4+2]; } }
+  sm/=n; tm/=n;
+  let cov=0,vs=0,vt=0;
+  for(let p=0;p<4096;p++){ if(t.mask[p]){ const a=(0.299*np[p*4]+0.587*np[p*4+1]+0.114*np[p*4+2])-sm; const b=(0.299*tp[p*4]+0.587*tp[p*4+1]+0.114*tp[p*4+2])-tm;
+    cov+=a*b; vs+=a*a; vt+=b*b; } }
+  if(vs<1e-6||vt<1e-6) return 0; return cov/Math.sqrt(vs*vt);
+}
 function maskedNCC(np,t){
   const tp=t.data,n=t.n; if(n===0) return -1;
   let sr=0,sg=0,sb=0; for(let p=0;p<4096;p++){ if(t.mask[p]){ sr+=np[p*4];sg+=np[p*4+1];sb+=np[p*4+2]; } }
@@ -525,9 +537,11 @@ function preprocessForOCR(crop){
   const w=crop.width,h=crop.height; const scale=Math.min(4,Math.max(2,Math.round(320/Math.max(w,h))));
   const c=document.createElement('canvas'); c.width=w*scale;c.height=h*scale; const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(crop,0,0,c.width,c.height);
   const id=g.getImageData(0,0,c.width,c.height); const px=id.data; const N=c.width*c.height;
-  let sum=0; const gray=new Uint8Array(N); for(let i=0;i<N;i++){ const v=Math.round(0.299*px[i*4]+0.587*px[i*4+1]+0.114*px[i*4+2]); gray[i]=v; sum+=v; }
+  const gray=new Uint8Array(N); const greenI=new Int16Array(N); let sum=0;
+  for(let i=0;i<N;i++){ const r=px[i*4],gg=px[i*4+1],b=px[i*4+2];
+    const v=Math.round(0.299*r+0.587*gg+0.114*b); gray[i]=v; sum+=v; greenI[i]=gg-Math.max(r,b); }
   const invert=(sum/N)<128; const hist=new Uint32Array(256); for(let i=0;i<N;i++) hist[gray[i]]++; const th=otsu(hist,N);
-  for(let i=0;i<N;i++){ let b=gray[i]>=th?255:0; if(invert)b=255-b; px[i*4]=px[i*4+1]=px[i*4+2]=b; px[i*4+3]=255; }
+  for(let i=0;i<N;i++){ let fg=(gray[i]>=th)?1:0; if(greenI[i]>50) fg=1; /* 绿色文字（技能名常为绿色）单独增强为前景 */ let b=fg?255:0; if(invert)b=255-b; px[i*4]=px[i*4+1]=px[i*4+2]=b; px[i*4+3]=255; }
   g.putImageData(id,0,0); return c;
 }
 function otsu(hist,N){ let total=0; for(let i=0;i<256;i++) total+=i*hist[i];
