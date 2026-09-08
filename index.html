@@ -164,11 +164,13 @@ progress::-webkit-progress-value{background:var(--accent); border-radius:3px;}
           <h3>⚙️ 操作</h3>
           <div class="row">
             <button class="btn" id="btn-edit">区域编辑</button>
+            <button class="btn" id="btn-relocate" disabled>更新位置</button>
             <button class="btn primary" id="btn-recognize" disabled>手动识别</button>
             <label class="switch"><input type="checkbox" id="auto-toggle">自动识别</label>
           </div>
           <div id="ocr-status" style="margin-top:8px;">题库加载中…</div>
           <progress id="bank-progress" value="0" max="100" style="margin-top:6px;"></progress>
+          <div class="note" style="margin-top:6px;">提示：当「看图说话」框移动、图标框与技能图标不重合时，点「更新位置」重新校准（图标框与选项框相对位置保持不变）。</div>
         </div>
         <div class="card">
           <h3>🎨 区域图例</h3>
@@ -354,7 +356,7 @@ async function startShare(){
     state.bt.hasMap.fill(false);
     state.streaming=true;
     $('stream-badge').textContent='共享中'; $('stream-badge').classList.add('on');
-    $('btn-share').disabled=true; $('btn-stop').disabled=false; $('btn-recognize').disabled=false;
+    $('btn-share').disabled=true; $('btn-stop').disabled=false; $('btn-recognize').disabled=false; $('btn-relocate').disabled=false;
     $('hint').style.display='none';
     stream.getVideoTracks()[0].addEventListener('ended',stopShare);
   }catch(e){ alert('屏幕共享失败：'+(e&&e.message?e.message:e)); }
@@ -364,7 +366,7 @@ function stopShare(){
   state.stream=null; state.streaming=false;
   state.bt._lastVW=0; shareDpr=1;
   $('stream-badge').textContent='未共享'; $('stream-badge').classList.remove('on');
-  $('btn-share').disabled=false; $('btn-stop').disabled=true; $('btn-recognize').disabled=true;
+  $('btn-share').disabled=false; $('btn-stop').disabled=true; $('btn-recognize').disabled=true; $('btn-relocate').disabled=true;
   $('hint').style.display='';
   const dw=$('dpi-warn'); if(dw) dw.style.display='none';
 }
@@ -514,6 +516,8 @@ function autoTrim(srcCanvas){
   return srcCanvas;
 }
 function matchIcon(crop, indices){
+  // 先裁剪掉背景边缘（图标框可略大于图标，autoTrim 去掉四周背景让图标填满，提高 NCC 重合度）
+  crop=autoTrim(crop);
   const S=64; const norm=document.createElement('canvas'); norm.width=S;norm.height=S;
   const ng=norm.getContext('2d',{willReadFrequently:true}); ng.drawImage(crop,0,0,S,S); const np=ng.getImageData(0,0,S,S).data;
   let bestIdx=-1,bestScore=-2;
@@ -594,20 +598,40 @@ function textSimilarity(a,b){ a=cleanText(a);b=cleanText(b); if(!a||!b)return 0;
   const sa=new Set(a.split('')),sb=new Set(b.split('')); let inter=0; for(const c of sa) if(sb.has(c)) inter++;
   const jac=inter/(sa.size+sb.size-inter); const lev=1-levenshtein(a,b)/Math.max(a.length,b.length); return Math.max(jac,lev); }
 function bestDictMatch(text){ if(!text)return {name:'',score:0}; let best='',bs=0; for(const d of state.dictionary){ const s=textSimilarity(text,d); if(s>bs){ bs=s;best=d; } } return {name:best,score:bs}; }
-function findAnswer(optionTexts,correctName){ let bestI=-1,bestScore=0;
-  const details=optionTexts.map(raw=>{ const m=bestDictMatch(raw); const direct=textSimilarity(raw,correctName); return {raw,dict:m.name,dictScore:m.score,direct,s:Math.max(m.score,direct)}; });
-  for(let i=0;i<details.length;i++){ const d=details[i]; let score=d.s; if(d.dict===correctName) score=Math.max(score,0.95); d.final=score; if(score>bestScore){ bestScore=score;bestI=i; } }
-  return {index:bestI,conf:bestScore,details}; }
+function findAnswer(optionTexts,correctName){
+  let bestI=-1,bestScore=0;
+  // 关键：答案匹配应以「选项文字 vs 正确名」的直接相似度为准，而不是 bestDictMatch 与字典的相似度。
+  // 旧逻辑 d.s = max(m.score, direct)，其中 m.score 是 raw 与「字典里最相似词」的相似度，
+  // 精确 OCR 的文字恒为 1.0，导致所有选项得分都接近 1.0，correctName 的加分被淹没 → 永远返回第一个选项。
+  const details=optionTexts.map(raw=>{
+    const m=bestDictMatch(raw);
+    const direct=textSimilarity(raw,correctName);       // raw 与正确名的直接相似度
+    const dictHit=(m.name===correctName)?1:0;           // 字典纠正后是否等于正确名
+    const s=Math.max(direct, dictHit?0.96:0);
+    return {raw,dict:m.name,dictScore:m.score,direct,s};
+  });
+  for(let i=0;i<details.length;i++){
+    const d=details[i];
+    let score=d.s;
+    if(d.dict===correctName) score=Math.max(score,0.96);
+    d.final=score;
+    if(score>bestScore){ bestScore=score; bestI=i; }
+  }
+  return {index:bestI,conf:bestScore,details};
+}
 
 /* ===================== 教师节：识别流程 ===================== */
 async function ocrOptions(frame){ const texts=[]; for(let i=1;i<=4;i++){ texts.push(await ocrOne(preprocessForOCR(cropRegion(frame,state.regions['opt'+i])))); } return texts; }
-/* 用候选图标（四个选项的技能名）在答题框附近自动定位大图标，返回最佳匹配 {index,score,x,y,w,h} */
-async function locateIcon(frame, indices){
-  // 搜索区域：当前 icon 区域外扩（跟随「看图说话」框移动，避免误匹配技能栏等游戏 UI）
-  const r=state.regions.icon;
-  const cx=r.x+r.w/2, cy=r.y+r.h/2;
-  const region={ x0:Math.max(0,(cx-r.w*1.5))*frame.width, y0:Math.max(0,(cy-r.h*2.2))*frame.height,
-                x1:Math.min(frame.width,(cx+r.w*1.5))*frame.width, y1:Math.min(frame.height,(cy+r.h*2.2))*frame.height };
+/* 用候选图标（四个选项的技能名）定位大图标，返回最佳匹配 {index,score,x,y,w,h}。
+   fullScan=true 时全屏搜索（用于「更新位置」按钮，答题框可能移动较远）；否则在当前 icon 区域附近搜索 */
+async function locateIcon(frame, indices, fullScan){
+  let region=null;
+  if(!fullScan){
+    const r=state.regions.icon;
+    const cx=r.x+r.w/2, cy=r.y+r.h/2;
+    region={ x0:Math.max(0,(cx-r.w*2.0))*frame.width, y0:Math.max(0,(cy-r.h*3.0))*frame.height,
+             x1:Math.min(frame.width,(cx+r.w*2.0))*frame.width, y1:Math.min(frame.height,(cy+r.h*3.0))*frame.height };
+  }
   const best={index:-1,score:-2,x:0,y:0,w:0,h:0,s:1};
   for(const i of indices){
     const img=new Image(); img.src=bank[i].icon;
@@ -621,6 +645,36 @@ async function locateIcon(frame, indices){
   }
   return best;
 }
+/* 「更新位置」按钮：手动触发一次定位（不自动），找到大图标后图标框+选项框一起平移（保持相对位置固定） */
+async function relocateIcon(){
+  if(!state.streaming||!video.videoWidth) return;
+  if(state.recognizing) return; state.recognizing=true;
+  try{
+    const frame=getFrame(); if(!frame){ return; }
+    $('ocr-status').textContent='正在定位图标位置…';
+    // 1. OCR 四个选项得到候选
+    const texts=await ocrOptions(frame);
+    const names=texts.map(t=>bestDictMatch(t).name);
+    const indices=[]; for(const n of names){ if(!n) continue; const i=bank.findIndex(d=>d.name===n); if(i>=0) indices.push(i); }
+    if(indices.length<2){ $('ocr-status').textContent='定位失败：选项 OCR 不足，请先手动对齐图标框'; return; }
+    // 2. 全屏搜索定位大图标
+    const loc=await locateIcon(frame, indices, true);
+    if(loc.index<0 || loc.score<0.4){ $('ocr-status').textContent='定位失败：未找到图标，请手动拖动图标框对齐'; return; }
+    // 3. 计算偏移（新图标中心 vs 旧图标中心），图标框与选项框一起平移，保持相对位置固定
+    const newCx=(loc.x+loc.w/2)/frame.width, newCy=(loc.y+loc.h/2)/frame.height;
+    const oldR=state.regions.icon;
+    const dx=newCx-(oldR.x+oldR.w/2), dy=newCy-(oldR.y+oldR.h/2);
+    // 图标框设为定位结果，略放大（完整显示图标）
+    const pad=1.15;
+    state.regions.icon={ x:clamp((loc.x-loc.w*(pad-1)/2)/frame.width,0,1), y:clamp((loc.y-loc.h*(pad-1)/2)/frame.height,0,1),
+                        w:Math.min(1,loc.w*pad/frame.width), h:Math.min(1,loc.h*pad/frame.height) };
+    // 选项框一起平移（相对位置固定）
+    for(let i=1;i<=4;i++){ const r=state.regions['opt'+i]; r.x=clamp(r.x+dx,0,1-r.w); r.y=clamp(r.y+dy,0,1-r.h); }
+    saveRegions();
+    $('ocr-status').textContent='位置已更新（图标='+bank[loc.index].name+'），点「手动识别」确认';
+  }catch(e){ $('ocr-status').textContent='定位出错：'+(e&&e.message?e.message:e); }
+  finally{ state.recognizing=false; }
+}
 async function recognize(manual){
   if(!state.streaming||!video.videoWidth) return; if(state.recognizing) return; state.recognizing=true;
   try{
@@ -630,21 +684,11 @@ async function recognize(manual){
     const texts=await ocrOptions(frame);
     const names=texts.map(t=>bestDictMatch(t).name);
     const indices=[]; for(const n of names){ if(!n) continue; const i=bank.findIndex(d=>d.name===n); if(i>=0) indices.push(i); }
-    // 2. 匹配大图标：优先用候选图标自动定位（跟随「看图说话」框移动），失败则用当前 icon 区域兜底
-    let match;
-    if(indices.length>=2){
-      const loc=await locateIcon(frame, indices);
-      if(loc.index>=0 && loc.score>0.45){
-        // 自动定位成功：更新 icon 区域（归一化），大图标 = 候选里分数最高的
-        state.regions.icon={ x:loc.x/frame.width, y:loc.y/frame.height, w:loc.w/frame.width, h:loc.h/frame.height };
-        match={ index:loc.index, name:bank[loc.index].name, category:bank[loc.index].category, color:bank[loc.index].color, score:loc.score };
-      } else {
-        const crop=cropRegion(frame,state.regions.icon); crop=autoTrim(crop); match=matchIcon(crop, indices);
-      }
-    } else {
-      const crop=cropRegion(frame,state.regions.icon); crop=autoTrim(crop); match=matchIcon(crop);
-    }
-    showResult(match, match.index>=0?cropRegion(frame,state.regions.icon):null);
+    // 2. 固定区域匹配大图标（不再自动定位——自动定位会把图标框误拖到错误位置，
+    //    导致「识别结果」与「答案框选」双双出错）。用户通过「更新位置」按钮手动校准位置。
+    const crop=cropRegion(frame,state.regions.icon);
+    const match = (indices.length>=2) ? matchIcon(crop, indices) : matchIcon(crop);
+    showResult(match, match.index>=0?crop:null);
     // 3. 答案
     if(match.index>=0){ const hash=String(match.index);
       if(manual||hash!==state.lastIconHash){ state.lastIconHash=hash;
@@ -1374,6 +1418,7 @@ $('btn-share').addEventListener('click',startShare);
 $('btn-stop').addEventListener('click',stopShare);
 $('btn-edit').addEventListener('click',()=>{ state.editMode=!state.editMode; $('btn-edit').textContent=state.editMode?'区域编辑':'锁定区域'; });
 $('btn-recognize').addEventListener('click',()=>recognize(true));
+$('btn-relocate').addEventListener('click',relocateIcon);
 $('auto-toggle').addEventListener('change',toggleAuto);
 $('btn-sort').addEventListener('click',()=>buildSorted());
 window.addEventListener('resize',()=>layout());
