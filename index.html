@@ -616,7 +616,19 @@ function toggleAuto(){ state.autoMode=$('auto-toggle').checked; if(state.autoMod
 /* ===================== 藏宝图：自动定位背包格子 ===================== */
 function downsampleData(frame, scale){
   const sw=Math.max(1,Math.round(frame.width*scale)), sh=Math.max(1,Math.round(frame.height*scale));
-  const c=document.createElement('canvas'); c.width=sw;c.height=sh; const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(frame,0,0,sw,sh);
+  // 分步降采样（每步缩到约 1/2），减少一次性大幅缩放的锯齿/模糊，提升小模板 NCC 匹配质量
+  // （这是之前图标检测不准、阈值被迫降到 0.4 的根因之一）
+  let src=frame, cw=frame.width, ch=frame.height;
+  while(cw/2>=sw && ch/2>=sh){
+    const hw=Math.max(sw, cw>>1), hh=Math.max(sh, ch>>1);
+    const c=document.createElement('canvas'); c.width=hw; c.height=hh;
+    const g=c.getContext('2d',{willReadFrequently:true}); g.imageSmoothingEnabled=true;
+    g.drawImage(src,0,0,hw,hh);
+    src=c; cw=hw; ch=hh;
+  }
+  const c=document.createElement('canvas'); c.width=sw; c.height=sh;
+  const g=c.getContext('2d',{willReadFrequently:true}); g.imageSmoothingEnabled=true;
+  g.drawImage(src,0,0,sw,sh);
   return {data:g.getImageData(0,0,sw,sh).data, w:sw, h:sh};
 }
 function autoLocateGrid(frame){
@@ -643,31 +655,95 @@ function detectScale(frame){
   }
   return bestScale;
 }
-function findIconsAtScale(frame, scale){
+function findIconsAtScale(frame, scale, region){
   const baseW=state.bt.iconW, baseH=state.bt.iconH;
-  const SC=0.25, d=downsampleData(frame,SC);
+  const SC=0.33, d0=downsampleData(frame,SC);
+  // region 限制：只扫描上次网格附近（±3 格），大幅提速（背包移动时只要不超边距即可跟上）
+  let d=d0, ox=0, oy=0;
+  if(region && region.x1-region.x0>60 && region.y1-region.y0>60){
+    const rx=Math.max(0,Math.round(region.x0)), ry=Math.max(0,Math.round(region.y0));
+    const rw=Math.min(frame.width-rx, Math.round(region.x1-region.x0));
+    const rh=Math.min(frame.height-ry, Math.round(region.y1-region.y0));
+    if(rw>60 && rh>60){
+      const crop=document.createElement('canvas'); crop.width=rw; crop.height=rh;
+      crop.getContext('2d',{willReadFrequently:true}).drawImage(frame,rx,ry,rw,rh,0,0,rw,rh);
+      d=downsampleData(crop,SC);
+      ox=rx; oy=ry;
+    }
+  }
   const tw=Math.max(4,Math.round(baseW*SC*scale)), th=Math.max(4,Math.round(baseH*SC*scale));
   const td=scaledIconData(tw,th);
-  // 阈值 0.4：JS drawImage 降采样质量低于 OpenCV，图标 NCC 分数偏低，0.5 会漏检（实测运行5 漏一半）
-  const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.4,3);
-  const coarse=nmsMatches(ms, baseW*0.6*SC, baseH*0.6*SC).slice(0,25).map(m=>({x:Math.round(m.x/SC), y:Math.round(m.y/SC)}));
+  // 分步降采样 + SC=0.33 提升匹配质量，阈值 0.45（实测运行7：13 个图标全命中，误检少）
+  const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.45,3);
+  const coarse=nmsMatches(ms, baseW*0.6*SC, baseH*0.6*SC).slice(0,25).map(m=>({x:Math.round(m.x/SC)+ox, y:Math.round(m.y/SC)+oy}));
   if(!coarse.length) return {positions:[], iconW:baseW, iconH:baseH};
   // 图标尺寸直接用 scale 推导（NCC 匹配的 scale 是可靠信号），绝不用格子间距 gx 反推。
-  // 旧代码用 gx*98/102 反推，隐含「格子/图标≈1.04」假设——但「道具行囊」等标签页格子远大于图标
-  // （实测运行6：格子间距146、图标68，比例2.15），反推会把 iconW 算成140（实际68），导致网格整体错位。
   const iconW=Math.round(baseW*scale);
   const iconH=Math.round(baseH*scale);
-  return {positions:coarse, iconW, iconH};
+  // 全分辨率精修：消除降采样粗定位误差（网格原点偏移的主因之一）
+  const refined = refineIcons(frame, coarse, iconW, iconH);
+  return {positions:refined, iconW, iconH};
+}
+/* 全分辨率精修图标位置：对每个粗图标在 ±2px 内做 NCC 精搜，并过滤低分误检 */
+function refineIcons(frame, coarse, iconW, iconH){
+  if(!coarse.length) return coarse;
+  const W=frame.width, H=frame.height;
+  const fdata=frame.getContext('2d',{willReadFrequently:true}).getImageData(0,0,W,H).data;
+  const tc=document.createElement('canvas'); tc.width=iconW; tc.height=iconH;
+  const tg=tc.getContext('2d',{willReadFrequently:true}); tg.drawImage(state.bt.iconImg,0,0,iconW,iconH);
+  const td=tg.getImageData(0,0,iconW,iconH).data;
+  const N=iconW*iconH;
+  let tm=0; for(let i=0;i<N;i++){ tm+=td[i*4]+td[i*4+1]+td[i*4+2]; } tm/=N*3;
+  const tv=new Float32Array(N*3); let tn=0;
+  for(let i=0;i<N;i++)for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; }
+  tn=Math.sqrt(tn);
+  function nccAt(x,y){
+    if(x<0||y<0||x+iconW>W||y+iconH>H) return -1;
+    let sm=0; for(let j=0;j<iconH;j++)for(let i=0;i<iconW;i++){ const idx=((y+j)*W+(x+i))*4; sm+=fdata[idx]+fdata[idx+1]+fdata[idx+2]; } sm/=N*3;
+    let cov=0,sn=0;
+    for(let j=0;j<iconH;j++)for(let i=0;i<iconW;i++){ const idx=((y+j)*W+(x+i))*4; for(let k=0;k<3;k++){ const sv=fdata[idx+k]-sm; cov+=sv*tv[(j*iconW+i)*3+k]; sn+=sv*sv; } }
+    return (sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):-1;
+  }
+  const R=2, out=[];
+  for(const p of coarse){
+    let bx=p.x, by=p.y, bs=-1;
+    for(let dy=-R;dy<=R;dy++)for(let dx=-R;dx<=R;dx++){
+      const s=nccAt(p.x+dx, p.y+dy);
+      if(s>bs){ bs=s; bx=p.x+dx; by=p.y+dy; }
+    }
+    if(bs>0.5) out.push({x:bx, y:by, sc:bs});
+  }
+  // 按分数排序，去重（精修后同一图标可能重叠）
+  out.sort((a,b)=>b.sc-a.sc);
+  const kept=[];
+  for(const o of out){
+    if(kept.some(k=>Math.abs(k.x-o.x)<iconW*0.5 && Math.abs(k.y-o.y)<iconH*0.5)) continue;
+    kept.push({x:o.x, y:o.y});
+  }
+  return kept;
 }
 function findIconPositions(frame){
+  // 用上次网格算 region（±3 格），背包移动时只扫附近，大幅提速且避免误检其他区域
+  let region=null;
+  if(state.bt.grid && state.bt.grid.w>40){
+    const g=state.bt.grid, pad=g.w/5*3;
+    region={ x0:g.x-pad, y0:g.y-pad, x1:g.x+g.w+pad, y1:g.y+g.h+pad };
+  }
   // 优先用缓存 scale 快速定位
   let scale = state.bt.lastScale || 1;
-  let found = findIconsAtScale(frame, scale);
-  // 仅当定位失败（图标太少，说明 scale 变了/背包不可见）才全尺度粗扫重定比例
-  if(found.positions.length < 2){
-    scale = detectScale(frame);
+  let found = findIconsAtScale(frame, scale, region);
+  // 图标太少（<3）才重扫比例；重扫后若与缓存接近（±0.2）保持缓存，避免离散档位跳变导致网格忽大忽小
+  if(found.positions.length < 3){
+    const newScale = detectScale(frame);
+    if(state.bt.lastScale && Math.abs(newScale - state.bt.lastScale) < 0.2){
+      scale = state.bt.lastScale;
+    } else {
+      scale = newScale;
+      state.bt.lastScale = scale;
+    }
+    found = findIconsAtScale(frame, scale, region);
+  } else {
     state.bt.lastScale = scale;
-    found = findIconsAtScale(frame, scale);
   }
   // 双开/多窗口：图标可能来自多个背包，按空间聚簇。保存所有簇，主簇先取最大簇
   state.bt.clusters=null;
