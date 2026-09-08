@@ -272,12 +272,13 @@ $('sidebar-jieri').style.display = 'flex';
 /* ===================== 区域（教师节） ===================== */
 function defaultRegions(){
   return {
-    icon:{x:0.14,y:0.10,w:0.26,h:0.30}, opt1:{x:0.12,y:0.56,w:0.36,h:0.15},
-    opt2:{x:0.52,y:0.56,w:0.36,h:0.15}, opt3:{x:0.12,y:0.76,w:0.36,h:0.15}, opt4:{x:0.52,y:0.76,w:0.36,h:0.15},
+    // 看图说话图标居中偏上，4 个选项 2×2 在下方（按游戏答题界面实际布局）
+    icon:{x:0.32,y:0.40,w:0.36,h:0.20}, opt1:{x:0.22,y:0.62,w:0.26,h:0.12},
+    opt2:{x:0.54,y:0.62,w:0.26,h:0.12}, opt3:{x:0.22,y:0.76,w:0.26,h:0.12}, opt4:{x:0.54,y:0.76,w:0.26,h:0.12},
   };
 }
-function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
-function saveRegions(){ try{ localStorage.setItem('mhxy_regions', JSON.stringify(state.regions)); }catch(e){} }
+function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions_v2'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
+function saveRegions(){ try{ localStorage.setItem('mhxy_regions_v2', JSON.stringify(state.regions)); }catch(e){} }
 
 /* ===================== 题库（教师节） ===================== */
 const bank = window.QUESTION_BANK || [];
