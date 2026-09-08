@@ -278,15 +278,16 @@ $('sidebar-jieri').style.display = 'flex';
 /* ===================== 区域（教师节） ===================== */
 function defaultRegions(){
   return {
-    // 按 5.png（3840×1995）实测的固定布局：看图说话大图标在框左侧（约 x910-1010/y740-870），
-    // 4 个选项 2×2 在下方。图标框略大于图标以完整显示；选项框紧贴技能名文字。
+    // 按 8.png（3813×1779，用户手动调好的最终布局）实测：看图说话大图标在框左侧（约 x817-966/y682-861），
+    // 4 个选项 2×2 在下方（技能名文字约 y1071/1268）。图标框略大于图标以完整显示；选项框紧贴技能名文字。
     // （坐标均为归一化比例，共享窗口固定后，背景与图标/选项的相对位置不变）
-    icon:{x:0.230,y:0.362,w:0.040,h:0.080}, opt1:{x:0.250,y:0.549,w:0.052,h:0.040},
-    opt2:{x:0.405,y:0.549,w:0.043,h:0.040}, opt3:{x:0.260,y:0.649,w:0.031,h:0.040}, opt4:{x:0.401,y:0.649,w:0.051,h:0.040},
+    icon:{x:0.214,y:0.383,w:0.039,h:0.101},
+    opt1:{x:0.248,y:0.598,w:0.045,h:0.030}, opt2:{x:0.400,y:0.598,w:0.045,h:0.030},
+    opt3:{x:0.248,y:0.709,w:0.045,h:0.030}, opt4:{x:0.400,y:0.709,w:0.045,h:0.030},
   };
 }
-function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions_v4'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
-function saveRegions(){ try{ localStorage.setItem('mhxy_regions_v4', JSON.stringify(state.regions)); }catch(e){} }
+function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions_v5'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
+function saveRegions(){ try{ localStorage.setItem('mhxy_regions_v5', JSON.stringify(state.regions)); }catch(e){} }
 
 /* ===================== 题库（教师节） ===================== */
 const bank = window.QUESTION_BANK || [];
@@ -304,14 +305,26 @@ function loadIconAsData(src,size){
       const iw=img.naturalWidth,ih=img.naturalHeight; const sc=Math.min(size/iw,size/ih); const dw=iw*sc,dh=ih*sc;
       g.drawImage(img,(size-dw)/2,(size-dh)/2,dw,dh);
       const id=g.getImageData(0,0,size,size); const px=id.data;
-      const mask=new Uint8Array(size*size); const hist=new Float64Array(24);
+      const mask=new Uint8Array(size*size); const hist=new Float64Array(24); const hueHist=new Float64Array(16);
       let n=0,sr=0,sg=0,sb=0;
       for(let p=0;p<size*size;p++){ if(px[p*4+3]>40){ mask[p]=1;n++;sr+=px[p*4];sg+=px[p*4+1];sb+=px[p*4+2];
-        hist[Math.min(7,px[p*4]>>5)]++; hist[8+Math.min(7,px[p*4+1]>>5)]++; hist[16+Math.min(7,px[p*4+2]>>5)]++; } }
-      resolve({data:px,mask,n,mean:[n?sr/n:0,n?sg/n:0,n?sb/n:0],hist});
+        hist[Math.min(7,px[p*4]>>5)]++; hist[8+Math.min(7,px[p*4+1]>>5)]++; hist[16+Math.min(7,px[p*4+2]>>5)]++;
+        // HSV 色相直方图（16 bins），只统计有颜色（饱和度>0.12）的像素。
+        // 游戏渲染会把暗色图标提亮，但色相（hue）基本保留，因此色相直方图比 RGB 直方图更鲁棒。
+        const r=px[p*4],gg=px[p*4+1],bb=px[p*4+2];
+        const mx=Math.max(r,gg,bb), mn=Math.min(r,gg,bb);
+        const sat = mx===0 ? 0 : (mx-mn)/mx;
+        if(sat>0.12){ let h;
+          if(mx===mn) h=0;
+          else if(mx===r) h=((gg-bb)/(mx-mn))%6;
+          else if(mx===gg) h=(bb-r)/(mx-mn)+2;
+          else h=(r-gg)/(mx-mn)+4;
+          h=h/6; if(h<0)h+=1;
+          hueHist[Math.min(15,Math.floor(h*16))]++; } } }
+      resolve({data:px,mask,n,mean:[n?sr/n:0,n?sg/n:0,n?sb/n:0],hist,hueHist});
     };
     img.onerror=()=>{ const c=document.createElement('canvas'); c.width=size;c.height=size; const g=c.getContext('2d'); g.clearRect(0,0,size,size);
-      const id=g.getImageData(0,0,size,size); resolve({data:id,mask:new Uint8Array(size*size),n:0,mean:[0,0,0],hist:new Float64Array(24)}); };
+      const id=g.getImageData(0,0,size,size); resolve({data:id,mask:new Uint8Array(size*size),n:0,mean:[0,0,0],hist:new Float64Array(24),hueHist:new Float64Array(16)}); };
     img.src=src;
   });
 }
@@ -529,13 +542,40 @@ function matchIcon(crop, indices){
   let bestIdx=-1,bestScore=-2;
   // 若指定 indices（如四个选项候选），只在这些里匹配，区分度大幅提高；否则全量匹配
   const list = indices && indices.length ? indices : state.templates.map((_,i)=>i);
+  const cropHue = hueHistOfCrop(np);
   for(let k=0;k<list.length;k++){ const i=list[k]; const t=state.templates[i]; if(!t||t.n<20) continue;
-    // 形状匹配为主（灰度 NCC，比较图标内部图形轮廓/明暗），颜色直方图辅助（区分同形异色如「破釜沉舟」）
-    const shape=grayNCC(np,t); const color=histCorr(histOfCrop(np,t.mask),t.hist); const sc=0.7*shape+0.3*color;
+    // 匹配 = RGB三通道NCC（形状+颜色） + HSV色相直方图相关（颜色鲁棒）。
+    // 游戏渲染会把暗色图标提亮/发光，灰度 NCC 区分度差（深色图标灰度接近黑）；
+    // 实测 hue 相关对正确候选区分度最好（8.png 姐妹同心 hue=0.925 vs 干扰项 0.73/0.74）。
+    const rgb=maskedNCC(np,t);
+    const hue=hueCorr(cropHue,t.hueHist);
+    const sc=0.45*rgb+0.55*hue;
     if(sc>bestScore){ bestScore=sc; bestIdx=i; } }
   if(bestIdx<0) return {index:-1,name:'',category:'',color:'',score:-1};
   return {index:bestIdx,name:bank[bestIdx].name,category:bank[bestIdx].category,color:bank[bestIdx].color,score:bestScore};
 }
+/* 计算 crop 的 HSV 色相直方图（16 bins，只用有颜色像素），与模板预计算的 hueHist 做相关 */
+function hueHistOfCrop(np){
+  const hist=new Float64Array(16);
+  for(let p=0;p<4096;p++){
+    const r=np[p*4], g=np[p*4+1], b=np[p*4+2];
+    const mx=Math.max(r,g,b), mn=Math.min(r,g,b);
+    const sat = mx===0 ? 0 : (mx-mn)/mx;
+    if(sat>0.12){ let h;
+      if(mx===mn) h=0;
+      else if(mx===r) h=((g-b)/(mx-mn))%6;
+      else if(mx===g) h=(b-r)/(mx-mn)+2;
+      else h=(r-g)/(mx-mn)+4;
+      h=h/6; if(h<0)h+=1;
+      hist[Math.min(15,Math.floor(h*16))]++; }
+  }
+  return hist;
+}
+function hueCorr(h1,h2){ const L=h1.length; let m1=0,m2=0;
+  for(let i=0;i<L;i++){ m1+=h1[i];m2+=h2[i]; } m1/=L;m2/=L;
+  let cov=0,v1=0,v2=0;
+  for(let i=0;i<L;i++){ const a=h1[i]-m1,b=h2[i]-m2; cov+=a*b;v1+=a*a;v2+=b*b; }
+  if(v1<1e-9||v2<1e-9) return 0; return cov/Math.sqrt(v1*v2); }
 function histOfCrop(np,mask){ const hist=new Float64Array(24); for(let p=0;p<4096;p++){ if(mask[p]){ hist[Math.min(7,np[p*4]>>5)]++; hist[8+Math.min(7,np[p*4+1]>>5)]++; hist[16+Math.min(7,np[p*4+2]>>5)]++; } } return hist; }
 function histCorr(h1,h2){ const L=h1.length; let m1=0,m2=0; for(let i=0;i<L;i++){ m1+=h1[i];m2+=h2[i]; } m1/=L;m2/=L;
   let cov=0,v1=0,v2=0; for(let i=0;i<L;i++){ const a=h1[i]-m1,b=h2[i]-m2; cov+=a*b;v1+=a*a;v2+=b*b; } if(v1<1e-9||v2<1e-9) return 0; return cov/Math.sqrt(v1*v2); }
@@ -683,14 +723,15 @@ async function relocateIcon(){
   }catch(e){ $('ocr-status').textContent='定位出错：'+(e&&e.message?e.message:e); }
   finally{ state.recognizing=false; }
 }
-/* 计算图标区域像素哈希（降采样到 8×8 求和），用于判断题目是否变化 */
+/* 计算图标区域像素哈希（降采样到 8×8，灰度量化到 12 级），用于判断题目是否变化。
+   量化步长约 64，能容忍视频噪声（同题目轻微抖动不触发重识别），但图标替换时哈希会明显变化 */
 function frameHash(frame, region){
   const crop=cropRegion(frame, region);
   const S=8; const c=document.createElement('canvas'); c.width=S; c.height=S;
   const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(crop,0,0,S,S);
   const d=g.getImageData(0,0,S,S).data;
-  let sum=0; for(let i=0;i<S*S;i++){ sum=(sum*31 + d[i*4] + d[i*4+1] + d[i*4+2])|0; }
-  return sum;
+  let h=0; for(let i=0;i<S*S;i++){ const v=(d[i*4] + d[i*4+1] + d[i*4+2])>>6; h=(h*13+v)|0; }
+  return h;
 }
 async function recognize(manual){
   if(!state.streaming||!video.videoWidth) return; if(state.recognizing) return; state.recognizing=true;
@@ -700,7 +741,7 @@ async function recognize(manual){
     // 直接保持已识别结果（一次性显示、不跳变），并大幅提速。
     if(!manual){
       const h=frameHash(frame, state.regions.icon);
-      if(h===state.iconHash){ state.recognizing=false; return; }
+      if(h===state.iconHash && state.lastIconHash!==''){ state.recognizing=false; return; }
       state.iconHash=h;
     }
     // 1. 先 OCR 四个选项（缩小候选范围，提高大图标匹配区分度）
@@ -712,15 +753,13 @@ async function recognize(manual){
     const crop=cropRegion(frame,state.regions.icon);
     const match = (indices.length>=2) ? matchIcon(crop, indices) : matchIcon(crop);
     showResult(match, match.index>=0?crop:null);
-    // 3. 答案（识别结果去抖动：连续 2 次一致才更新，避免候选间跳动导致答案反复横跳）
-    if(match.index>=0){ const hash=String(match.index);
-      if(hash===state._rawHash){ state._stable=(state._stable||0)+1; }
-      else{ state._rawHash=hash; state._stable=1; }
-      if(manual || (state._stable>=2 && hash!==state.lastIconHash)){
-        state.lastIconHash=hash;
-        const ans=findAnswer(texts,match.name); state.lastAnswer=ans.index>=0?ans.index+1:null;
-        renderOptions(ans.details,match.name,ans.index); $('ocr-status').textContent=state.lastAnswer?('已识别：选项 '+state.lastAnswer):'未找到匹配选项';
-      }
+    // 3. 答案：题目确认变化（或手动）→ 立即更新，不再用「连续2次一致」去抖动
+    //    （旧去抖动与 frameHash 快速路径冲突：首次识别 _stable=1 不更新，后续帧哈希相同直接跳过，
+    //      导致答案永远不更新 →「四个选项识别」不工作。frameHash 已保证题目锁定，无需二次去抖动。）
+    if(match.index>=0){
+      state.lastIconHash=String(match.index);
+      const ans=findAnswer(texts,match.name); state.lastAnswer=ans.index>=0?ans.index+1:null;
+      renderOptions(ans.details,match.name,ans.index); $('ocr-status').textContent=state.lastAnswer?('已识别：选项 '+state.lastAnswer):'未找到匹配选项';
     }
     else{ $('ocr-status').textContent='未匹配到图标，请调整图标区域'; }
   }catch(e){ $('ocr-status').textContent='识别出错：'+(e&&e.message?e.message:e); }
