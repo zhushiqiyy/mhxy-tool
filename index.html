@@ -1,0 +1,1207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>梦幻西游 · 辅助工具</title>
+<style>
+:root{
+  --bg:#0f1420; --panel:#171d2b; --panel2:#1e2637; --line:#2a3348;
+  --text:#e6ebf5; --muted:#8b96ab; --accent:#3b82f6; --green:#22c55e;
+  --red:#ff3b3b; --yellow:#f59e0b;
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+html,body{height:100%;}
+body{font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif; background:var(--bg); color:var(--text); font-size:14px; overflow:hidden;}
+button{font-family:inherit;}
+
+#login-overlay{position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:1000;}
+.login-box{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:34px 32px; width:340px; text-align:center;}
+.login-box h2{font-size:20px; margin-bottom:6px;}
+.login-box h2 b{color:var(--accent);}
+.login-box p{color:var(--muted); font-size:12px; margin-bottom:22px;}
+.login-box input{width:100%; padding:11px 14px; border-radius:8px; border:1px solid var(--line); background:var(--panel2); color:var(--text); font-size:15px; letter-spacing:2px; outline:none;}
+.login-box input:focus{border-color:var(--accent);}
+.login-box button{width:100%; margin-top:14px; padding:11px; border-radius:8px; border:none; background:var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer;}
+.login-error{color:var(--red); font-size:12px; margin-top:10px; min-height:18px;}
+
+#app{display:flex; flex-direction:column; height:100vh;}
+
+header{display:flex; align-items:center; gap:12px; padding:8px 16px; background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap;}
+header .logo{font-size:16px; font-weight:700; letter-spacing:.5px; margin-right:6px;}
+header .logo b{color:var(--accent);}
+nav{display:flex; gap:6px; background:var(--panel2); padding:4px; border-radius:9px;}
+.nav-tab{padding:7px 16px; border-radius:7px; border:none; background:transparent; color:var(--muted); cursor:pointer; font-size:14px; transition:.15s;}
+.nav-tab.active{background:var(--accent); color:#fff; font-weight:600;}
+.badge{font-size:12px; padding:3px 9px; border-radius:20px; background:var(--panel2); color:var(--muted); border:1px solid var(--line);}
+.badge.on{background:#0e3b24; color:#4ade80; border-color:#1e6b45;}
+.btn{padding:7px 13px; border-radius:8px; border:1px solid var(--line); background:var(--panel2); color:var(--text); cursor:pointer; font-size:13px; transition:.15s; white-space:nowrap;}
+.btn:hover{border-color:var(--accent);}
+.btn.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600;}
+.btn.danger{background:var(--red); border-color:var(--red); color:#fff;}
+.btn:disabled{opacity:.45; cursor:not-allowed;}
+.spacer{flex:1;}
+
+main{flex:1; display:flex; min-height:0;}
+.stage-wrap{flex:0 0 58%; position:relative; background:#000; min-width:0; display:flex; align-items:center; justify-content:center;}
+#stage{position:relative; width:100%; height:100%;}
+#display{position:absolute; inset:0; width:100%; height:100%; cursor:crosshair;}
+.hint-center{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:var(--muted); text-align:center; pointer-events:none;}
+.hint-center .big{font-size:26px; margin-bottom:10px;}
+
+aside{flex:1 1 42%; min-width:420px; background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:14px;}
+.card{background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:12px;}
+.card h3{font-size:13px; color:var(--muted); margin-bottom:10px; font-weight:600; letter-spacing:.5px;}
+.row{display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+.row+.row{margin-top:8px;}
+.kv{display:flex; justify-content:space-between; font-size:12px; padding:4px 0; color:var(--muted);}
+.kv b{color:var(--text);}
+label.switch{display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; font-size:13px;}
+.switch input{width:16px; height:16px; accent-color:var(--accent);}
+.note{font-size:11px; color:var(--muted); line-height:1.7;}
+.note b{color:var(--yellow);}
+
+#result-icon{width:56px; height:56px; image-rendering:pixelated; background:#0b0f18; border:1px solid var(--line); border-radius:6px;}
+.result-name{font-size:20px; font-weight:700; color:#4ade80; margin-top:6px;}
+.result-meta{font-size:12px; color:var(--muted); margin-top:3px;}
+.score-bar{height:6px; background:#0b0f18; border-radius:3px; margin-top:8px; overflow:hidden;}
+.score-bar i{display:block; height:100%; background:linear-gradient(90deg,#f59e0b,#4ade80); width:0%; transition:width .3s;}
+.opt-item{display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; background:#0b0f18; margin-bottom:6px; font-size:13px; border:1px solid transparent;}
+.opt-item .idx{width:18px; height:18px; border-radius:4px; background:var(--panel2); display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--muted); flex-shrink:0;}
+.opt-item.hit{border-color:var(--red); background:#2a1216;}
+.opt-item.hit .idx{background:var(--red); color:#fff;}
+.legend{display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--muted);}
+.legend .li{display:flex; align-items:center; gap:8px;}
+.legend-box{display:flex; gap:16px; align-items:center; justify-content:flex-end; padding:4px 6px; font-size:12px; color:var(--muted); flex-wrap:wrap;}
+.legend-box .lg{display:flex; align-items:center; gap:6px;}
+.dot{width:12px; height:12px; border-radius:3px; display:inline-block;}
+#ocr-status{font-size:12px; color:var(--muted); line-height:1.6;}
+progress{width:100%; height:6px; appearance:none;}
+progress::-webkit-progress-bar{background:#0b0f18; border-radius:3px;}
+progress::-webkit-progress-value{background:var(--accent); border-radius:3px;}
+
+/* 侧栏（两个标签页内部都上下排列，填满侧栏高度） */
+#sidebar-jieri, #sidebar-baotu{flex-direction:column; gap:14px; flex:1; min-height:0;}
+
+/* 藏宝图结果大表格（白底模拟背包格子，严格按界面1） */
+#bt-status{font-size:13px; color:var(--muted); line-height:1.6;}
+.bt-grid{display:grid; grid-template-columns:repeat(5,1fr); gap:2px; background:#9aa0aa; padding:2px; border-radius:6px;}
+.bt-cell{aspect-ratio:1; background:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; font-size:15px; color:#333; position:relative; text-align:center; padding:4px; line-height:1.25; overflow:hidden;}
+.bt-cell .pos{position:absolute; top:3px; left:5px; font-size:10px; color:#9aa0aa;}
+.bt-cell.gray{background:#e2e5ea;}
+.bt-cell.has{background:#fff; color:#333;}
+.bt-cell.has .nm{font-size:15px; font-weight:600;}
+.bt-cell.coord{background:#fff; color:#111;}
+.bt-cell.coord .nm{font-size:17px; font-weight:700;}
+.bt-cell.coord .xy{font-size:14px; color:#444;}
+
+/* 排序列表 */
+.sort-list{display:flex; flex-direction:column; gap:4px;}
+.sort-item{display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; background:#0b0f18; border:1px solid var(--line); font-size:12px;}
+.sort-item .order{width:20px; height:20px; border-radius:50%; background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center; font-size:11px; flex-shrink:0;}
+.sort-item .tag{background:var(--panel2); border-radius:4px; padding:1px 5px; font-size:10px; color:var(--muted);}
+.sort-item .ctrl{margin-left:auto; display:flex; gap:4px;}
+.sort-item .ctrl button{width:20px; height:20px; border-radius:4px; border:1px solid var(--line); background:var(--panel2); color:var(--text); cursor:pointer; font-size:12px; line-height:1;}
+.sort-item.dragging{opacity:.4;}
+</style>
+</head>
+<body>
+<div id="login-overlay">
+  <div class="login-box">
+    <h2>梦幻西游 · <b>辅助工具</b></h2>
+    <p>请输入访问口令进入</p>
+    <input type="password" id="pwd-input" placeholder="访问口令" autocomplete="off">
+    <button id="login-btn">进入</button>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+  <header>
+    <div class="logo">梦幻西游 · <b>辅助工具</b></div>
+    <nav>
+      <button class="nav-tab active" data-tab="jieri">教师节答题</button>
+      <button class="nav-tab" data-tab="baotu">藏宝图识别</button>
+    </nav>
+    <div class="spacer"></div>
+    <span class="badge" id="stream-badge">未共享</span>
+    <span class="badge" id="ocr-badge">OCR 未就绪</span>
+    <button class="btn primary" id="btn-share">开始共享屏幕</button>
+    <button class="btn danger" id="btn-stop" disabled>停止共享</button>
+  </header>
+
+  <main>
+    <div class="stage-wrap">
+      <div id="stage">
+        <canvas id="display"></canvas>
+        <div class="hint-center" id="hint">
+          <div class="big">🖥️</div>
+          <div>点击「开始共享屏幕」选择梦幻西游游戏窗口</div>
+        </div>
+      </div>
+    </div>
+
+    <aside>
+      <!-- 教师节答题 -->
+      <div id="sidebar-jieri">
+        <div class="card">
+          <h3>🎯 识别结果</h3>
+          <div style="display:flex; gap:12px; align-items:flex-start;">
+            <canvas id="result-icon" width="56" height="56"></canvas>
+            <div style="flex:1;">
+              <div class="result-name" id="result-name">—</div>
+              <div class="result-meta" id="result-meta">等待识别…</div>
+            </div>
+          </div>
+          <div class="score-bar"><i id="score-fill"></i></div>
+          <div class="kv"><span>匹配置信度</span><b id="score-text">—</b></div>
+        </div>
+        <div class="card">
+          <h3>📋 四个选项识别</h3>
+          <div id="opt-list"><div class="note">尚未识别选项</div></div>
+        </div>
+        <div class="card">
+          <h3>⚙️ 操作</h3>
+          <div class="row">
+            <button class="btn" id="btn-edit">区域编辑</button>
+            <button class="btn primary" id="btn-recognize" disabled>手动识别</button>
+            <label class="switch"><input type="checkbox" id="auto-toggle">自动识别</label>
+          </div>
+          <div id="ocr-status" style="margin-top:8px;">题库加载中…</div>
+          <progress id="bank-progress" value="0" max="100" style="margin-top:6px;"></progress>
+        </div>
+        <div class="card">
+          <h3>🎨 区域图例</h3>
+          <div class="legend">
+            <div class="li"><span class="dot" style="background:#3b82f6"></span>图标区域（看图说话的图）</div>
+            <div class="li"><span class="dot" style="background:#22c55e"></span>选项 1 / 2 / 3 / 4</div>
+            <div class="li"><span class="dot" style="background:#ff3b3b"></span>识别出的正确答案（红框）</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 藏宝图识别 -->
+      <div id="sidebar-baotu" style="display:none;">
+        <div class="card" style="flex:1; display:flex; flex-direction:column;">
+          <h3>背包宝图识别结果（4×5）</h3>
+          <div class="bt-grid" id="bt-grid"></div>
+          <div id="bt-status" style="margin-top:8px;">等待共享屏幕…</div>
+        </div>
+        <div class="card">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <h3 style="flex:1; margin-bottom:0;">智能排序（同位置在前）</h3>
+            <button class="btn primary" id="btn-sort">排序</button>
+          </div>
+          <div class="sort-list" id="sort-list" style="margin-top:10px;"><div class="note">点击「排序」按钮后按位置归类整理</div></div>
+        </div>
+        <div class="legend-box">
+          <span class="lg"><span class="dot" style="background:#22c55e"></span>有宝图</span>
+          <span class="lg"><span class="dot" style="background:#7dd3fc"></span>已读坐标</span>
+          <span class="lg"><span class="dot" style="background:#2a3348"></span>空格</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<script src="question_bank.js"></script>
+<script src="baotu_icon.js"></script>
+<script src="baotu_refs.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+(function(){
+'use strict';
+
+/* ===================== 登录 ===================== */
+const ACCESS_PASSWORD = 'qwer1234uiop7890';
+function tryLogin(){
+  if(document.getElementById('pwd-input').value === ACCESS_PASSWORD){ sessionStorage.setItem('mhxy_auth','1'); showApp(); }
+  else{ document.getElementById('login-error').textContent='口令错误，请重试'; document.getElementById('pwd-input').value=''; document.getElementById('pwd-input').focus(); }
+}
+function showApp(){ document.getElementById('login-overlay').style.display='none'; document.getElementById('app').style.display='flex'; }
+document.getElementById('login-btn').addEventListener('click',tryLogin);
+document.getElementById('pwd-input').addEventListener('keydown',e=>{ if(e.key==='Enter') tryLogin(); });
+if(sessionStorage.getItem('mhxy_auth')==='1'){ showApp(); } else { document.getElementById('pwd-input').focus(); }
+
+/* ===================== 常量与状态 ===================== */
+const REGION_KEYS = ['icon','opt1','opt2','opt3','opt4'];
+const REGION_COLORS = { icon:'#3b82f6', opt1:'#22c55e', opt2:'#22c55e', opt3:'#22c55e', opt4:'#22c55e' };
+const REGION_LABELS = { icon:'图标', opt1:'选项1', opt2:'选项2', opt3:'选项3', opt4:'选项4' };
+
+const state = {
+  streaming:false, stream:null, activeTab:'jieri',
+  autoMode:false, editMode:true, recognizing:false,
+  ocrReady:false, ocrWorker:null,
+  templates:[], dictionary:[],
+  regions: loadRegions(),
+  lastAnswer:null, lastIconHash:'',
+  dragging:null,
+  bt: {
+    grid:null,            // {x,y,w,h} 视频像素坐标，自动定位
+    iconPositions:[],     // 精修后的图标位置（帧像素），用于映射格子
+    hasMap: new Array(20).fill(false),
+    coords: new Array(20).fill(null),   // {name,x,y}
+    iconImg:null, iconData:null, iconW:98, iconH:100,
+    iconWActual:98, iconHActual:100,
+    mouseImg:null, mouseData:null, mouseMask:null, mouseW:78, mouseH:69,
+    tooltipImg:null, tooltipData:null, tooltipW:628, tooltipH:340,
+    cursorCell:-1, lastReadCell:-1, readPending:0, reading:false, readSessionCell:-1,
+    sortOrder:[], loopTimer:null, loopCount:0, lastScale:null, _lastTip:null, clusters:null,
+  }
+};
+
+/* ===================== DOM ===================== */
+const $ = id => document.getElementById(id);
+const canvas = $('display'), ctx = canvas.getContext('2d');
+const stage = $('stage');
+const video = document.createElement('video');
+video.muted = true; video.playsInline = true;
+
+/* ===================== 导航 ===================== */
+document.querySelectorAll('.nav-tab').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('.nav-tab').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    state.activeTab = btn.dataset.tab;
+    $('sidebar-jieri').style.display = state.activeTab==='jieri' ? 'flex' : 'none';
+    $('sidebar-baotu').style.display = state.activeTab==='baotu' ? 'flex' : 'none';
+  });
+});
+$('sidebar-jieri').style.display = 'flex';
+
+/* ===================== 区域（教师节） ===================== */
+function defaultRegions(){
+  return {
+    icon:{x:0.14,y:0.10,w:0.26,h:0.30}, opt1:{x:0.12,y:0.56,w:0.36,h:0.15},
+    opt2:{x:0.52,y:0.56,w:0.36,h:0.15}, opt3:{x:0.12,y:0.76,w:0.36,h:0.15}, opt4:{x:0.52,y:0.76,w:0.36,h:0.15},
+  };
+}
+function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
+function saveRegions(){ try{ localStorage.setItem('mhxy_regions', JSON.stringify(state.regions)); }catch(e){} }
+
+/* ===================== 题库（教师节） ===================== */
+const bank = window.QUESTION_BANK || [];
+function buildDictionary(){ const seen=new Set(); state.dictionary=[]; for(const d of bank){ if(!seen.has(d.name)){ seen.add(d.name); state.dictionary.push(d.name); } } }
+async function buildTemplates(onProgress){
+  const N=bank.length; state.templates=new Array(N); const S=64;
+  for(let i=0;i<N;i++){ state.templates[i]=await loadIconAsData(bank[i].icon,S); if(i%20===0) onProgress(Math.round(i/N*100)); }
+  onProgress(100);
+}
+function loadIconAsData(src,size){
+  return new Promise((resolve)=>{
+    const img=new Image();
+    img.onload=()=>{
+      const c=document.createElement('canvas'); c.width=size; c.height=size; const g=c.getContext('2d'); g.clearRect(0,0,size,size);
+      const iw=img.naturalWidth,ih=img.naturalHeight; const sc=Math.min(size/iw,size/ih); const dw=iw*sc,dh=ih*sc;
+      g.drawImage(img,(size-dw)/2,(size-dh)/2,dw,dh);
+      const id=g.getImageData(0,0,size,size); const px=id.data;
+      const mask=new Uint8Array(size*size); const hist=new Float64Array(24);
+      let n=0,sr=0,sg=0,sb=0;
+      for(let p=0;p<size*size;p++){ if(px[p*4+3]>40){ mask[p]=1;n++;sr+=px[p*4];sg+=px[p*4+1];sb+=px[p*4+2];
+        hist[Math.min(7,px[p*4]>>5)]++; hist[8+Math.min(7,px[p*4+1]>>5)]++; hist[16+Math.min(7,px[p*4+2]>>5)]++; } }
+      resolve({data:px,mask,n,mean:[n?sr/n:0,n?sg/n:0,n?sb/n:0],hist});
+    };
+    img.onerror=()=>{ const c=document.createElement('canvas'); c.width=size;c.height=size; const g=c.getContext('2d'); g.clearRect(0,0,size,size);
+      const id=g.getImageData(0,0,size,size); resolve({data:id,mask:new Uint8Array(size*size),n:0,mean:[0,0,0],hist:new Float64Array(24)}); };
+    img.src=src;
+  });
+}
+
+/* ===================== 藏宝图资源加载 ===================== */
+function loadImg(src){ return new Promise((res,rej)=>{ const img=new Image(); img.onload=()=>res(img); img.onerror=rej; img.src=src; }); }
+function imgToData(img){ const c=document.createElement('canvas'); c.width=img.naturalWidth; c.height=img.naturalHeight; const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(img,0,0); return {data:g.getImageData(0,0,c.width,c.height), w:img.naturalWidth, h:img.naturalHeight}; }
+async function loadBaotuRefs(){
+  // 宝图图标
+  const iconImg = await loadImg(window.BAOTU_ICON||'');
+  state.bt.iconW=iconImg.naturalWidth; state.bt.iconH=iconImg.naturalHeight;
+  state.bt.iconImg=iconImg;
+  const ic=imgToData(iconImg); state.bt.iconData=ic.data;
+  // 游戏内鼠标（非白色部分为鼠标图形）
+  const mouseImg = await loadImg(window.MOUSE_ICON||'');
+  state.bt.mouseW=mouseImg.naturalWidth; state.bt.mouseH=mouseImg.naturalHeight;
+  state.bt.mouseImg=mouseImg;
+  const mc=imgToData(mouseImg); state.bt.mouseData=mc.data;
+  state.bt.mouseMask = new Uint8Array(mc.w*mc.h);
+  for(let i=0;i<mc.w*mc.h;i++){ const r=mc.data[i*4],g=mc.data[i*4+1],b=mc.data[i*4+2]; state.bt.mouseMask[i] = (r<240||g<240||b<240)?1:0; }
+  // 识别藏宝图 tooltip（固定部分：标题+描述+类型，不含会变的坐标行）
+  const tipImg = await loadImg(window.TOOLTIP_TOP_ICON||window.TOOLTIP_ICON||'');
+  state.bt.tooltipW=tipImg.naturalWidth; state.bt.tooltipH=tipImg.naturalHeight;
+  state.bt.tooltipImg=tipImg;
+  const tc=imgToData(tipImg); state.bt.tooltipData=tc.data;
+}
+
+/* ===================== 屏幕共享 ===================== */
+async function startShare(){
+  try{
+    const stream=await navigator.mediaDevices.getDisplayMedia({ video:{ frameRate:{ideal:30}, cursor:'never' }, audio:false });
+    state.stream=stream; video.srcObject=stream;
+    if(video.readyState<2){ await new Promise(res=>{ video.onloadedmetadata=res; }); }
+    await video.play();
+    state.streaming=true;
+    $('stream-badge').textContent='共享中'; $('stream-badge').classList.add('on');
+    $('btn-share').disabled=true; $('btn-stop').disabled=false; $('btn-recognize').disabled=false;
+    $('hint').style.display='none';
+    stream.getVideoTracks()[0].addEventListener('ended',stopShare);
+  }catch(e){ alert('屏幕共享失败：'+(e&&e.message?e.message:e)); }
+}
+function stopShare(){
+  if(state.stream){ state.stream.getTracks().forEach(t=>t.stop()); }
+  state.stream=null; state.streaming=false;
+  $('stream-badge').textContent='未共享'; $('stream-badge').classList.remove('on');
+  $('btn-share').disabled=false; $('btn-stop').disabled=true; $('btn-recognize').disabled=true;
+  $('hint').style.display='';
+}
+
+/* ===================== OCR ===================== */
+async function initOCR(){
+  const badge=$('ocr-badge'); badge.textContent='OCR 加载中…';
+  try{
+    if(typeof Tesseract==='undefined') throw new Error('Tesseract 库未加载');
+    state.ocrWorker=await Tesseract.createWorker('chi_sim',1,{});
+    state.ocrReady=true; badge.textContent='OCR 就绪'; badge.classList.add('on');
+  }catch(e){ badge.textContent='OCR 失败'; }
+}
+
+/* ===================== 渲染 ===================== */
+let lastSize={w:0,h:0,dpr:0};
+function layout(){
+  const dpr=window.devicePixelRatio||1; const w=stage.clientWidth,h=stage.clientHeight;
+  if(w!==lastSize.w||h!==lastSize.h||dpr!==lastSize.dpr){ lastSize={w,h,dpr};
+    canvas.width=Math.max(1,Math.floor(w*dpr)); canvas.height=Math.max(1,Math.floor(h*dpr));
+    canvas.style.width=w+'px'; canvas.style.height=h+'px'; }
+  return {w,h,dpr};
+}
+function contentRect(){
+  const vw=video.videoWidth,vh=video.videoHeight; if(!vw||!vh) return {x:0,y:0,w:1,h:1};
+  const sw=stage.clientWidth,sh=stage.clientHeight; const scale=Math.min(sw/vw,sh/vh); const dw=vw*scale,dh=vh*scale;
+  return {x:(sw-dw)/2,y:(sh-dh)/2,w:dw,h:dh};
+}
+function render(){
+  const {dpr}=layout(); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,stage.clientWidth,stage.clientHeight);
+  const cr=contentRect();
+  if(state.streaming && video.videoWidth){
+    ctx.drawImage(video,cr.x,cr.y,cr.w,cr.h);
+    if(state.activeTab==='jieri'){ drawRegions(cr); drawAnswer(cr); }
+    else drawBaotuOverlay(cr);
+  }
+  requestAnimationFrame(render);
+}
+function rectToPx(r,cr){ return {x:cr.x+r.x*cr.w,y:cr.y+r.y*cr.h,w:r.w*cr.w,h:r.h*cr.h}; }
+function drawRegions(cr){
+  if(!state.editMode||state.activeTab!=='jieri') return;
+  for(const k of REGION_KEYS){ const r=state.regions[k]; const p=rectToPx(r,cr);
+    ctx.strokeStyle=REGION_COLORS[k]; ctx.lineWidth=2; ctx.setLineDash([6,4]); ctx.strokeRect(p.x,p.y,p.w,p.h); ctx.setLineDash([]);
+    ctx.fillStyle=REGION_COLORS[k]; ctx.fillRect(p.x,p.y-20,44,20); ctx.fillStyle='#fff'; ctx.font='12px Microsoft YaHei'; ctx.textBaseline='middle'; ctx.fillText(REGION_LABELS[k],p.x+6,p.y-9);
+    ctx.fillRect(p.x+p.w-6,p.y+p.h-6,12,12); ctx.strokeStyle='#fff'; ctx.strokeRect(p.x+p.w-6,p.y+p.h-6,12,12); }
+}
+function drawAnswer(cr){
+  const ans=state.lastAnswer; if(!ans||!state.regions['opt'+ans]) return;
+  const p=rectToPx(state.regions['opt'+ans],cr);
+  ctx.lineWidth=4; ctx.strokeStyle='#ff3b3b'; ctx.strokeRect(p.x-3,p.y-3,p.w+6,p.h+6);
+  ctx.fillStyle='rgba(255,59,59,0.18)'; ctx.fillRect(p.x,p.y,p.w,p.h);
+  ctx.fillStyle='#ff3b3b'; const lbl='✓ 答案'; ctx.font='bold 14px Microsoft YaHei';
+  const tw=ctx.measureText(lbl).width; ctx.fillRect(p.x-3,p.y-26,tw+14,24); ctx.fillStyle='#fff'; ctx.textBaseline='middle'; ctx.fillText(lbl,p.x+4,p.y-13);
+}
+
+/* ---- 藏宝图 overlay：在背包格子上直接标注 ---- */
+function drawBaotuOverlay(cr){
+  const g=state.bt.grid; if(!g) return;
+  // 归一化到视频坐标
+  const vw=video.videoWidth,vh=video.videoHeight; if(!vw||!vh) return;
+  const gx=g.x,gw=g.w;
+  // 画格子
+  const sx=cr.x+cr.w*(gx/vw), sy=cr.y+cr.h*(g.y/vh);
+  const cw=cr.w*(gw/vw), ch=cr.h*(g.h/vh);
+  for(let r=0;r<4;r++) for(let c=0;c<5;c++){
+    const idx=r*5+c; const x=sx+c*cw/5, y=sy+r*ch/4, w=cw/5, h=ch/4;
+    const cd=state.bt.coords[idx];
+    if(cd){
+      // 已读坐标：蓝底 + 白字
+      ctx.fillStyle='rgba(14,42,58,0.88)'; ctx.fillRect(x+1,y+1,w-2,h-2);
+      ctx.strokeStyle='#7dd3fc'; ctx.lineWidth=2; ctx.strokeRect(x,y,w,h);
+      ctx.fillStyle='#7dd3fc'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      const fs=Math.max(11,Math.min(20,Math.round(h*0.22)));
+      ctx.font='bold '+fs+'px Microsoft YaHei';
+      ctx.fillText(cd.name, x+w/2, y+h/2-fs*0.7);
+      ctx.font=(fs-2)+'px Microsoft YaHei'; ctx.fillStyle='#a5d8ff';
+      ctx.fillText('('+cd.x+','+cd.y+')', x+w/2, y+h/2+fs*0.7);
+      ctx.textAlign='left';
+    }else if(state.bt.hasMap[idx]){
+      // 有宝图未读坐标：绿框
+      ctx.fillStyle='rgba(34,197,94,0.15)'; ctx.fillRect(x+1,y+1,w-2,h-2);
+      ctx.strokeStyle='#22c55e'; ctx.lineWidth=2; ctx.strokeRect(x,y,w,h);
+    }else{
+      // 空格：灰框
+      ctx.strokeStyle='rgba(139,150,171,0.4)'; ctx.lineWidth=1; ctx.strokeRect(x,y,w,h);
+    }
+    if(idx===state.bt.cursorCell){
+      ctx.strokeStyle='#ffd23b'; ctx.lineWidth=3; ctx.strokeRect(x-1,y-1,w+2,h+2);
+    }
+  }
+}
+
+/* ===================== 画布交互（教师节） ===================== */
+function hitTestRegion(mx,my,cr){
+  for(const k of REGION_KEYS){ const r=state.regions[k]; const p=rectToPx(r,cr);
+    const hx=p.x+p.w-6,hy=p.y+p.h-6;
+    if(mx>=hx-6&&mx<=hx+12&&my>=hy-6&&my<=hy+12) return {key:k,op:'resize'};
+    if(mx>=p.x&&mx<=p.x+p.w&&my>=p.y&&my<=p.y+p.h) return {key:k,op:'move'}; }
+  return null;
+}
+canvas.addEventListener('mousedown',e=>{
+  if(!state.streaming||state.activeTab!=='jieri'||!state.editMode) return;
+  const cr=contentRect(); const mx=e.offsetX,my=e.offsetY;
+  const hit=hitTestRegion(mx,my,cr); if(!hit) return;
+  const r=state.regions[hit.key];
+  state.dragging={key:hit.key,op:hit.op,startX:mx,startY:my,orig:{x:r.x,y:r.y,w:r.w,h:r.h},cr:{w:cr.w,h:cr.h}};
+});
+canvas.addEventListener('mousemove',e=>{
+  const d=state.dragging; if(!d) return;
+  const dx=(e.offsetX-d.startX)/d.cr.w, dy=(e.offsetY-d.startY)/d.cr.h;
+  const r=state.regions[d.key];
+  if(d.op==='move'){ r.x=clamp(d.orig.x+dx,0,1-r.w); r.y=clamp(d.orig.y+dy,0,1-r.h); }
+  else{ r.w=clamp(d.orig.w+dx,0.02,1-r.x); r.h=clamp(d.orig.h+dy,0.02,1-r.y); }
+  saveRegions();
+});
+canvas.addEventListener('mouseup',()=>{ state.dragging=null; });
+canvas.addEventListener('mouseleave',()=>{ state.dragging=null; });
+function clamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
+
+/* ===================== 图像采集 ===================== */
+let offscreen=null;
+function getFrame(){
+  const vw=video.videoWidth,vh=video.videoHeight; if(!vw||!vh) return null;
+  if(!offscreen||offscreen.width!==vw||offscreen.height!==vh){ offscreen=document.createElement('canvas'); offscreen.width=vw; offscreen.height=vh; }
+  offscreen.getContext('2d',{willReadFrequently:true}).drawImage(video,0,0); return offscreen;
+}
+function cropRegion(srcCanvas,r){
+  const x=Math.round(r.x*srcCanvas.width),y=Math.round(r.y*srcCanvas.height);
+  const w=Math.max(2,Math.round(r.w*srcCanvas.width)),h=Math.max(2,Math.round(r.h*srcCanvas.height));
+  const c=document.createElement('canvas'); c.width=w;c.height=h; c.getContext('2d').drawImage(srcCanvas,x,y,w,h,0,0,w,h); return c;
+}
+
+/* ===================== 教师节：图标匹配 ===================== */
+function autoTrim(srcCanvas){
+  const w=srcCanvas.width,h=srcCanvas.height; const g=srcCanvas.getContext('2d',{willReadFrequently:true}); const id=g.getImageData(0,0,w,h); const px=id.data;
+  function corner(cx,cy){ const i=(cy*w+cx)*4; return [px[i],px[i+1],px[i+2]]; }
+  const cs=[corner(0,0),corner(w-1,0),corner(0,h-1),corner(w-1,h-1)];
+  const bg=[0,1,2].map(ch=>(cs[0][ch]+cs[1][ch]+cs[2][ch]+cs[3][ch])/4);
+  let minX=w,minY=h,maxX=0,maxY=0;
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){ const i=(y*w+x)*4; const d=Math.abs(px[i]-bg[0])+Math.abs(px[i+1]-bg[1])+Math.abs(px[i+2]-bg[2]);
+    if(d>28){ if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y; } }
+  if(minX>maxX) return srcCanvas;
+  const fw=maxX-minX+1,fh=maxY-minY+1;
+  if(fw<w*0.85||fh<h*0.85){ const c=document.createElement('canvas'); c.width=Math.max(2,fw); c.height=Math.max(2,fh);
+    c.getContext('2d').drawImage(srcCanvas,minX,minY,fw,fh,0,0,c.width,c.height); return c; }
+  return srcCanvas;
+}
+function matchIcon(crop){
+  const S=64; const norm=document.createElement('canvas'); norm.width=S;norm.height=S;
+  const ng=norm.getContext('2d',{willReadFrequently:true}); ng.drawImage(crop,0,0,S,S); const np=ng.getImageData(0,0,S,S).data;
+  let bestIdx=-1,bestScore=-2;
+  for(let i=0;i<state.templates.length;i++){ const t=state.templates[i]; if(t.n<20) continue;
+    const ncc=maskedNCC(np,t); const color=histCorr(histOfCrop(np,t.mask),t.hist); const sc=0.65*ncc+0.35*color;
+    if(sc>bestScore){ bestScore=sc; bestIdx=i; } }
+  if(bestIdx<0) return {index:-1,name:'',category:'',color:'',score:-1};
+  return {index:bestIdx,name:bank[bestIdx].name,category:bank[bestIdx].category,color:bank[bestIdx].color,score:bestScore};
+}
+function histOfCrop(np,mask){ const hist=new Float64Array(24); for(let p=0;p<4096;p++){ if(mask[p]){ hist[Math.min(7,np[p*4]>>5)]++; hist[8+Math.min(7,np[p*4+1]>>5)]++; hist[16+Math.min(7,np[p*4+2]>>5)]++; } } return hist; }
+function histCorr(h1,h2){ const L=h1.length; let m1=0,m2=0; for(let i=0;i<L;i++){ m1+=h1[i];m2+=h2[i]; } m1/=L;m2/=L;
+  let cov=0,v1=0,v2=0; for(let i=0;i<L;i++){ const a=h1[i]-m1,b=h2[i]-m2; cov+=a*b;v1+=a*a;v2+=b*b; } if(v1<1e-9||v2<1e-9) return 0; return cov/Math.sqrt(v1*v2); }
+function maskedNCC(np,t){
+  const tp=t.data,n=t.n; if(n===0) return -1;
+  let sr=0,sg=0,sb=0; for(let p=0;p<4096;p++){ if(t.mask[p]){ sr+=np[p*4];sg+=np[p*4+1];sb+=np[p*4+2]; } }
+  const smr=sr/n,smg=sg/n,smb=sb/n,tmr=t.mean[0],tmg=t.mean[1],tmb=t.mean[2];
+  let cov=0,varT=0,varS=0;
+  for(let p=0;p<4096;p++){ if(t.mask[p]){ const dr=np[p*4]-smr,dg=np[p*4+1]-smg,db=np[p*4+2]-smb,tr=tp[p*4]-tmr,tg=tp[p*4+1]-tmg,tb=tp[p*4+2]-tmb;
+    cov+=dr*tr+dg*tg+db*tb; varS+=dr*dr+dg*dg+db*db; varT+=tr*tr+tg*tg+tb*tb; } }
+  if(varS<1e-6||varT<1e-6) return 0; return cov/Math.sqrt(varS*varT);
+}
+
+/* ===================== 教师节：OCR 选项 ===================== */
+function preprocessForOCR(crop){
+  const w=crop.width,h=crop.height; const scale=Math.min(4,Math.max(2,Math.round(320/Math.max(w,h))));
+  const c=document.createElement('canvas'); c.width=w*scale;c.height=h*scale; const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(crop,0,0,c.width,c.height);
+  const id=g.getImageData(0,0,c.width,c.height); const px=id.data; const N=c.width*c.height;
+  let sum=0; const gray=new Uint8Array(N); for(let i=0;i<N;i++){ const v=Math.round(0.299*px[i*4]+0.587*px[i*4+1]+0.114*px[i*4+2]); gray[i]=v; sum+=v; }
+  const invert=(sum/N)<128; const hist=new Uint32Array(256); for(let i=0;i<N;i++) hist[gray[i]]++; const th=otsu(hist,N);
+  for(let i=0;i<N;i++){ let b=gray[i]>=th?255:0; if(invert)b=255-b; px[i*4]=px[i*4+1]=px[i*4+2]=b; px[i*4+3]=255; }
+  g.putImageData(id,0,0); return c;
+}
+function otsu(hist,N){ let total=0; for(let i=0;i<256;i++) total+=i*hist[i];
+  let sumB=0,wB=0,maxVar=0,th=127;
+  for(let t=0;t<256;t++){ wB+=hist[t]; if(wB===0)continue; const wF=N-wB; if(wF===0)break;
+    sumB+=t*hist[t]; const mB=sumB/wB,mF=(total-sumB)/wF; const v=wB*wF*(mB-mF)*(mB-mF); if(v>maxVar){ maxVar=v;th=t; } }
+  return th; }
+function ocrOne(canvas){ if(!state.ocrReady||!state.ocrWorker) return Promise.resolve('');
+  return state.ocrWorker.recognize(canvas).then(r=>(r.data&&r.data.text)?r.data.text:'').catch(()=> ''); }
+/* 绿色文字预处理：绿色强度（G - max(R,B)）二值化，保留暗绿边缘像素（严格 g>r 会丢掉渐变边缘导致笔画断裂/漏位） */
+function preprocessGreen(crop){
+  const w=crop.width, h=crop.height;
+  const g=crop.getContext('2d',{willReadFrequently:true});
+  const id=g.getImageData(0,0,w,h); const px=id.data;
+  for(let i=0;i<w*h;i++){
+    const r=px[i*4], gg=px[i*4+1], b=px[i*4+2];
+    const intensity = gg - Math.max(r,b); // 绿色强度
+    const v = intensity>20 ? 0 : 255;      // 绿色文字=黑，其他=白
+    px[i*4]=v; px[i*4+1]=v; px[i*4+2]=v; px[i*4+3]=255;
+  }
+  g.putImageData(id,0,0);
+  const scale=Math.min(6,Math.max(3,Math.round(360/Math.max(w,h))));
+  const c=document.createElement('canvas'); c.width=w*scale; c.height=h*scale;
+  const cg=c.getContext('2d'); cg.imageSmoothingEnabled=false; cg.drawImage(crop,0,0,c.width,c.height);
+  return c;
+}
+function cleanText(t){ return (t||'').replace(/[\s\u3000·•\-—_—.,，。:：、()（）\[\]【】"'“”‘’!！?？]/g,''); }
+function levenshtein(a,b){ const m=a.length,n=b.length; if(!m)return n; if(!n)return m;
+  const dp=new Array(n+1); for(let j=0;j<=n;j++)dp[j]=j; for(let i=1;i<=m;i++){ let prev=dp[0]; dp[0]=i;
+    for(let j=1;j<=n;j++){ const tmp=dp[j]; dp[j]=Math.min(dp[j]+1,dp[j-1]+1,prev+(a[i-1]===b[j-1]?0:1)); prev=tmp; } } return dp[n]; }
+function textSimilarity(a,b){ a=cleanText(a);b=cleanText(b); if(!a||!b)return 0; if(a===b)return 1;
+  const sa=new Set(a.split('')),sb=new Set(b.split('')); let inter=0; for(const c of sa) if(sb.has(c)) inter++;
+  const jac=inter/(sa.size+sb.size-inter); const lev=1-levenshtein(a,b)/Math.max(a.length,b.length); return Math.max(jac,lev); }
+function bestDictMatch(text){ if(!text)return {name:'',score:0}; let best='',bs=0; for(const d of state.dictionary){ const s=textSimilarity(text,d); if(s>bs){ bs=s;best=d; } } return {name:best,score:bs}; }
+function findAnswer(optionTexts,correctName){ let bestI=-1,bestScore=0;
+  const details=optionTexts.map(raw=>{ const m=bestDictMatch(raw); const direct=textSimilarity(raw,correctName); return {raw,dict:m.name,dictScore:m.score,direct,s:Math.max(m.score,direct)}; });
+  for(let i=0;i<details.length;i++){ const d=details[i]; let score=d.s; if(d.dict===correctName) score=Math.max(score,0.95); d.final=score; if(score>bestScore){ bestScore=score;bestI=i; } }
+  return {index:bestI,conf:bestScore,details}; }
+
+/* ===================== 教师节：识别流程 ===================== */
+async function ocrOptions(frame){ const texts=[]; for(let i=1;i<=4;i++){ texts.push(await ocrOne(preprocessForOCR(cropRegion(frame,state.regions['opt'+i])))); } return texts; }
+async function recognize(manual){
+  if(!state.streaming||!video.videoWidth) return; if(state.recognizing) return; state.recognizing=true;
+  try{
+    const frame=getFrame(); if(!frame){ state.recognizing=false; return; }
+    let crop=cropRegion(frame,state.regions.icon); crop=autoTrim(crop); const match=matchIcon(crop); showResult(match,crop);
+    if(match.index>=0){ const hash=String(match.index);
+      if(manual||hash!==state.lastIconHash){ state.lastIconHash=hash; $('ocr-status').textContent='正在识别四个选项…';
+        const texts=await ocrOptions(frame); const ans=findAnswer(texts,match.name); state.lastAnswer=ans.index>=0?ans.index+1:null;
+        renderOptions(ans.details,match.name,ans.index); $('ocr-status').textContent=state.lastAnswer?('已识别：选项 '+state.lastAnswer):'未找到匹配选项'; } }
+    else{ $('ocr-status').textContent='未匹配到图标，请调整图标区域'; }
+  }catch(e){ $('ocr-status').textContent='识别出错：'+(e&&e.message?e.message:e); }
+  finally{ state.recognizing=false; }
+}
+function showResult(match,crop){ const rc=$('result-icon'),rg=rc.getContext('2d'); rg.clearRect(0,0,56,56);
+  if(match.index>=0){ rg.drawImage(crop,0,0,56,56); $('result-name').textContent=match.name; $('result-meta').textContent=match.category+' · '+match.color;
+    const sc=(match.score+1)/2; $('score-fill').style.width=Math.round(sc*100)+'%'; $('score-text').textContent=(sc*100).toFixed(1)+'%'; }
+  else{ $('result-name').textContent='未匹配'; $('result-meta').textContent='请调整图标区域'; $('score-fill').style.width='0%'; $('score-text').textContent='—'; } }
+function renderOptions(details,correctName,hitIndex){ const list=$('opt-list'); list.innerHTML='';
+  for(let i=0;i<details.length;i++){ const d=details[i]; const div=document.createElement('div'); div.className='opt-item'+(i===hitIndex?' hit':'');
+    const idx=document.createElement('span'); idx.className='idx'; idx.textContent=i+1; div.appendChild(idx);
+    const txt=document.createElement('span'); txt.textContent='“'+(d.raw?d.raw:'—')+'” → '+(d.dict||'?')+' ('+Math.round((typeof d.final==='number'?d.final:d.s)*100)+'%)';
+    div.appendChild(txt); list.appendChild(div); } }
+let autoTimer=null;
+function toggleAuto(){ state.autoMode=$('auto-toggle').checked; if(state.autoMode){ autoTimer=setInterval(()=>recognize(false),900); } else{ clearInterval(autoTimer); } }
+
+/* ===================== 藏宝图：自动定位背包格子 ===================== */
+function downsampleData(frame, scale){
+  const sw=Math.max(1,Math.round(frame.width*scale)), sh=Math.max(1,Math.round(frame.height*scale));
+  const c=document.createElement('canvas'); c.width=sw;c.height=sh; const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(frame,0,0,sw,sh);
+  return {data:g.getImageData(0,0,sw,sh).data, w:sw, h:sh};
+}
+function autoLocateGrid(frame){
+  const found = findIconPositions(frame);
+  if(found.positions.length){ state.bt.iconPositions=found.positions; state.bt.iconWActual=found.iconW; state.bt.iconHActual=found.iconH; }
+  return inferGrid(found, frame);
+}
+/* 多尺度图标定位：优先用缓存 scale 快速精扫；首次/失败时才全尺度粗扫定比例。
+   返回 {positions, iconW, iconH, scale}，网格精确位置由蓝灰边框线确定（inferGrid） */
+function detectScale(frame){
+  const baseW=state.bt.iconW, baseH=state.bt.iconH;
+  // 覆盖更宽的范围：共享屏幕可能是高分辨率（游戏窗口被放大 2-3 倍）
+  const SCALES=[0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.5,1.7,2.0,2.3,2.6,3.0];
+  const SC0=0.2, d0=downsampleData(frame,SC0);
+  let bestScale=1, bestCount=-1;
+  for(const s of SCALES){
+    const tw=Math.max(3,Math.round(baseW*SC0*s)), th=Math.max(3,Math.round(baseH*SC0*s));
+    if(tw<6||th<6) continue;             // 模板太小易匹配噪声，跳过
+    if(tw+2>=d0.w||th+2>=d0.h) continue;
+    const td=scaledIconData(tw,th);
+    const ms=scanTemplate(d0.data,d0.w,d0.h,td,tw,th,0.55,3);
+    const cnt=nmsMatches(ms, baseW*0.5*SC0, baseH*0.5*SC0).length;
+    if(cnt>bestCount){ bestCount=cnt; bestScale=s; }
+  }
+  return bestScale;
+}
+function findIconsAtScale(frame, scale){
+  const baseW=state.bt.iconW, baseH=state.bt.iconH;
+  const SC=0.25, d=downsampleData(frame,SC);
+  const tw=Math.max(4,Math.round(baseW*SC*scale)), th=Math.max(4,Math.round(baseH*SC*scale));
+  const td=scaledIconData(tw,th);
+  // 阈值 0.4：JS drawImage 降采样质量低于 OpenCV，图标 NCC 分数偏低，0.5 会漏检（实测运行5 漏一半）
+  const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.4,3);
+  const coarse=nmsMatches(ms, baseW*0.6*SC, baseH*0.6*SC).slice(0,25).map(m=>({x:Math.round(m.x/SC), y:Math.round(m.y/SC)}));
+  if(!coarse.length) return {positions:[], iconW:baseW, iconH:baseH};
+  const ccx=coarse.map(p=>p.x+baseW*scale/2).sort((a,b)=>a-b);
+  const ccy=coarse.map(p=>p.y+baseH*scale/2).sort((a,b)=>a-b);
+  const gx=medianGap(cluster1d(ccx, baseW*scale*0.4)), gy=medianGap(cluster1d(ccy, baseH*scale*0.4));
+  // 格子是正方形（102×102），gx=gy。用更可靠的 gx 推导图标宽高，避免 gy 因降采样抖动算错导致 iconH 异常
+  let iconW=(gx&&gx>0)?Math.round(gx*98/102):Math.round(baseW*scale);
+  let iconH=(gy&&gy>0&&Math.abs(gy-gx)<gx*0.5)?Math.round(gy*100/102):Math.round(iconW*100/98);
+  if(iconW<8||iconW>300) iconW=Math.round(baseW*scale);
+  if(iconH<8||iconH>300) iconH=Math.round(iconW*100/98);
+  return {positions:coarse, iconW, iconH};
+}
+function findIconPositions(frame){
+  // 优先用缓存 scale 快速定位
+  let scale = state.bt.lastScale || 1;
+  let found = findIconsAtScale(frame, scale);
+  // 仅当定位失败（图标太少，说明 scale 变了/背包不可见）才全尺度粗扫重定比例
+  if(found.positions.length < 2){
+    scale = detectScale(frame);
+    state.bt.lastScale = scale;
+    found = findIconsAtScale(frame, scale);
+  }
+  // 双开/多窗口：图标可能来自多个背包，按空间聚簇。保存所有簇，主簇先取最大簇
+  state.bt.clusters=null;
+  if(found.positions.length > 5){
+    const cls = clusterIcons(found.positions, Math.max(100, found.iconW*6));
+    if(cls.length > 1){
+      cls.sort((a,b)=>b.length-a.length);
+      state.bt.clusters=cls; // 保留所有簇，供坐标位置反选正确的背包
+      found.positions = cls[0];
+    }
+    // 过滤主簇内的离群点（低阈值引入的误检噪声，离簇质心过远）
+    found.positions = filterOutliers(found.positions, found.iconW);
+    // 用主簇重新计算 iconW/iconH（簇内间距更准确）
+    const ccx=found.positions.map(p=>p.x+found.iconW/2).sort((a,b)=>a-b);
+    const ccy=found.positions.map(p=>p.y+found.iconH/2).sort((a,b)=>a-b);
+    const gx=medianGap(cluster1d(ccx, found.iconW*0.4));
+    if(gx&&gx>0){ found.iconW=Math.round(gx*98/102); found.iconH=Math.round(found.iconW*100/98); }
+  }
+  return {positions:found.positions, iconW:found.iconW, iconH:found.iconH, scale};
+}
+/* 过滤簇内离群点：离质心距离超过 3.5×iconW 的图标视为误检噪声（真背包图标集中在 5×4 网格内）；迭代两次 */
+function filterOutliers(positions, iconW){
+  if(positions.length<6) return positions;
+  const iw=iconW||98;
+  let pts=positions;
+  for(let it=0; it<2; it++){
+    if(pts.length<5) break;
+    const cx=pts.reduce((s,p)=>s+p.x+iw/2,0)/pts.length;
+    const cy=pts.reduce((s,p)=>s+p.y+iw/2,0)/pts.length;
+    const maxD=iw*3.5;
+    const filtered=pts.filter(p=>Math.hypot(p.x+iw/2-cx, p.y+iw/2-cy)<maxD);
+    if(filtered.length===pts.length) break; // 收敛
+    pts=filtered;
+  }
+  return pts.length>=3?pts:positions;
+}
+/* 坐标文字位置 (cx,cy) → 找到它上方所属的图标簇（用于双开时反选正确的背包） */
+function clusterAtCoord(cx, cy){
+  const clusters=state.bt.clusters;
+  if(!clusters || clusters.length<2) return null;
+  const iw=state.bt.iconWActual||98;
+  // 找 cx,cy 下方/附近（含上方）最近的簇：坐标在被悬停宝图下方，簇在坐标上方
+  let best=null, bestDist=Infinity;
+  for(const cl of clusters){
+    for(const p of cl){
+      const pcx=p.x+iw/2, pcy=p.y+iw/2;
+      if(pcy >= cy) continue; // 图标在坐标上方
+      const d=Math.abs(pcx-cx)+Math.abs(pcy-cy)*2;
+      if(d<bestDist){ bestDist=d; best=cl; }
+    }
+  }
+  return best;
+}
+/* 图标空间聚簇：相邻（间距 < gap）归为一簇，用于区分双开窗口的多个背包 */
+function clusterIcons(positions, gap){
+  const clusters=[];
+  for(const p of positions){
+    let found=-1;
+    for(let i=0;i<clusters.length;i++){
+      if(clusters[i].some(q=>Math.abs(q.x-p.x)<gap && Math.abs(q.y-p.y)<gap)){ found=i; break; }
+    }
+    if(found>=0) clusters[found].push(p);
+    else clusters.push([p]);
+  }
+  return clusters;
+}
+function scaledIconData(tw,th){
+  const tc=document.createElement('canvas'); tc.width=tw; tc.height=th;
+  tc.getContext('2d').drawImage(state.bt.iconImg,0,0,tw,th);
+  return tc.getContext('2d').getImageData(0,0,tw,th).data;
+}
+function scanTemplate(data,w,h,td,tw,th,thr,step){
+  const N=tw*th; let tm=0; for(let i=0;i<N;i++){ tm+=td[i*4]+td[i*4+1]+td[i*4+2]; } tm/=N*3;
+  const tv=new Float32Array(N*3); let tn=0;
+  for(let i=0;i<N;i++)for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; }
+  tn=Math.sqrt(tn);
+  const out=[];
+  for(let y=0;y+th<=h;y+=step)for(let x=0;x+tw<=w;x+=step){
+    let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*w+(x+i))*4; sm+=data[idx]+data[idx+1]+data[idx+2]; } sm/=N*3;
+    let cov=0,sn=0;
+    for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*w+(x+i))*4; for(let k=0;k<3;k++){ const sv=data[idx+k]-sm; cov+=sv*tv[(j*tw+i)*3+k]; sn+=sv*sv; } }
+    const sc=(sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):0;
+    if(sc>thr) out.push({x,y,sc});
+  }
+  return out;
+}
+function nmsMatches(matches, dx, dy){
+  matches.sort((a,b)=>b.sc-a.sc);
+  const kept=[];
+  for(const m of matches){ if(kept.some(k=>Math.abs(k.x-m.x)<dx&&Math.abs(k.y-m.y)<dy)) continue; kept.push(m); }
+  return kept;
+}
+function inferGrid(found, frame){
+  const {positions, iconW, iconH} = found;
+  if(!positions.length) return null;
+  const cx = positions.map(p=>p.x+iconW/2).sort((a,b)=>a-b);
+  const cy = positions.map(p=>p.y+iconH/2).sort((a,b)=>a-b);
+  // 聚类为不同列/行，再求格子间距（格子≈图标×比例：宽102/98，高102/100）
+  const cols = cluster1d(cx, iconW*0.4), rows = cluster1d(cy, iconH*0.4);
+  let gx = medianGap(cols) || iconW*102/98;
+  let gy = medianGap(rows) || gx; // 单行/单列时格子为正方形，gy=gx
+  if(gx<iconW*0.6||gx>iconW*1.8) gx=iconW*102/98;
+  // 格子正方形（gx=gy）：gy 与 gx 差异过大（降采样抖动/行数不足）时，用 gx 兜底
+  if(gy<iconH*0.6||gy>iconH*1.8||Math.abs(gy-gx)>gx*0.4) gy=gx;
+
+  // 方案1（优先）：图标共识（≥2行且≥2列）——图标是 NCC 匹配的最可靠信号，不依赖边框（图标密集时横线被遮挡）
+  if(positions.length>=4 && cols.length>=2 && rows.length>=2){
+    const Lc=[]; for(const c of cx)for(let k=0;k<5;k++)Lc.push(c-(k+0.5)*gx);
+    const Tc=[]; for(const c of cy)for(let k=0;k<4;k++)Tc.push(c-(k+0.5)*gy);
+    const left=consensus(Lc,gx), top=consensus(Tc,gy);
+    if(left!=null&&top!=null) return {x:Math.round(left), y:Math.round(top), w:Math.round(gx*5), h:Math.round(gy*4)};
+  }
+  // 方案2（兜底）：蓝灰边框线确定绝对位置（单行/单列场景，图标少时边框仍可见）
+  if(frame){
+    const minX=Math.min(...positions.map(p=>p.x)), maxX=Math.max(...positions.map(p=>p.x+iconW));
+    const minY=Math.min(...positions.map(p=>p.y)), maxY=Math.max(...positions.map(p=>p.y+iconH));
+    const region={x0:Math.round(minX-gx*3), y0:Math.round(minY-gy*3), x1:Math.round(maxX+gx*3), y1:Math.round(maxY+gy*3)};
+    const border=detectBorder(frame, region);
+    const bv = findEvenLines(border.vlines, gx);
+    const bh = findEvenLines(border.hlines, gy);
+    if(bv.length>=2 && bh.length>=2){
+      // 蓝灰竖线含格子0左边界（bv[0]），横线含格子0顶边界（bh[0]）
+      return {x:Math.round(bv[0]), y:Math.round(bh[0]), w:Math.round(gx*5), h:Math.round(gy*4)};
+    }
+  }
+  // 方案3：仅按图标外推（至少1个图标，按最左/最上为基准外推完整网格）
+  if(positions.length>=1){
+    const left=Math.min(...cx)-gx/2, top=Math.min(...cy)-gy/2;
+    return {x:Math.round(left), y:Math.round(top), w:Math.round(gx*5), h:Math.round(gy*4)};
+  }
+  return null;
+}
+function findEvenLines(lines, gap){
+  lines=[...lines].sort((a,b)=>a-b);
+  let best=[];
+  const tol=Math.max(6,Math.round(gap*0.15));
+  for(let i=0;i<lines.length;i++){
+    const grp=[lines[i]]; let cur=lines[i];
+    for(let j=i+1;j<lines.length;j++){ if(Math.abs(lines[j]-cur-gap)<=tol){ grp.push(lines[j]); cur=lines[j]; } }
+    if(grp.length>best.length) best=grp;
+  }
+  return best;
+}
+function consensus(vals, gap){
+  vals.sort((a,b)=>a-b);
+  let best=[], cur=[vals[0]];
+  for(let i=1;i<vals.length;i++){ if(vals[i]-cur[cur.length-1]<gap*0.28) cur.push(vals[i]); else{ if(cur.length>best.length)best=cur; cur=[vals[i]]; } }
+  if(cur.length>best.length) best=cur;
+  if(!best.length) return null;
+  return best.reduce((a,b)=>a+b,0)/best.length;
+}
+function cluster1d(vals, tol){ const arr=[]; for(const v of vals){ if(arr.length&&v-arr[arr.length-1]<=tol){ arr[arr.length-1]=(arr[arr.length-1]+v)/2; } else arr.push(v); } return arr; }
+function medianGap(vals){ if(vals.length<2) return null; const gaps=[]; for(let i=1;i<vals.length;i++) gaps.push(vals[i]-vals[i-1]); gaps.sort((a,b)=>a-b); return gaps[Math.floor(gaps.length/2)]; }
+function detectBorder(frame, region){
+  // 只用蓝灰色检测网格线（斜面边框的亮色边 RGB 83,99,136 = BGR 136,99,83，干净可靠；紫色过于杂乱不可用）
+  // 性能：region 内用 0.5 降采样统计（去掉 sqrt，用平方距离），再回到全分辨率精修峰值 ±4px（像素级精度）
+  let SC=0.5, x0=0, y0=0, x1=frame.width, y1=frame.height;
+  if(region){
+    x0=Math.max(0,Math.round(region.x0)); y0=Math.max(0,Math.round(region.y0));
+    x1=Math.min(frame.width,Math.round(region.x1)); y1=Math.min(frame.height,Math.round(region.y1));
+    if(x1-x0<20||y1-y0<20) return {vlines:[],hlines:[]};
+  }
+  const {data,w,h}=downsampleData(frame,SC);
+  const T=[136,99,83], TOL2=20*20;
+  const colcnt=new Float32Array(w).fill(0), rowcnt=new Float32Array(h).fill(0);
+  const sx0=Math.max(0,Math.round(x0*SC)), sy0=Math.max(0,Math.round(y0*SC));
+  const sx1=Math.min(w,Math.round(x1*SC)), sy1=Math.min(h,Math.round(y1*SC));
+  for(let y=sy0;y<sy1;y++)for(let x=sx0;x<sx1;x++){
+    const i=(y*w+x)*4; const r=data[i],g=data[i+1],b=data[i+2]; // RGBA
+    const db=b-T[0], dg=g-T[1], dr=r-T[2]; // T 为 BGR
+    if(db*db+dg*dg+dr*dr<TOL2){ colcnt[x]++; rowcnt[y]++; }
+  }
+  const vPeaks=extractLines(colcnt), hPeaks=extractLines(rowcnt);
+  // 精修：降采样峰值映射回全分辨率后，在 ±4px 内精确找峰值（蓝灰线 1-2px 宽，降采样会损失精度）
+  const vlines=refineLines(frame, vPeaks, 1/SC, x0, x1, y0, y1, true);
+  const hlines=refineLines(frame, hPeaks, 1/SC, x0, x1, y0, y1, false);
+  return {vlines, hlines};
+}
+function refineLines(frame, peaks, invSC, x0, x1, y0, y1, isVertical){
+  if(!peaks.length) return [];
+  const T=[136,99,83], TOL2=20*20;
+  const W=frame.width, H=frame.height;
+  const ctx2d=frame.getContext('2d',{willReadFrequently:true});
+  const res=[];
+  for(const pk of peaks){
+    const approx=Math.round(pk*invSC);
+    let bestPos=approx, bestCnt=-1;
+    const lo=Math.max(0, approx-4), hi=Math.min((isVertical?W:H)-1, approx+4);
+    for(let p=lo;p<=hi;p++){
+      let cnt=0;
+      if(isVertical){
+        if(p<0||p>=W) continue;
+        const sy=Math.max(0,y0), sh=Math.min(H,y1)-sy; if(sh<=0) continue;
+        const d=ctx2d.getImageData(p,sy,1,sh).data;
+        for(let i=0;i<d.length;i+=4){ const b=d[i+2],g=d[i+1],r=d[i]; const db=b-T[0],dg=g-T[1],dr=r-T[2]; if(db*db+dg*dg+dr*dr<TOL2) cnt++; }
+      }else{
+        if(p<0||p>=H) continue;
+        const sx=Math.max(0,x0), sw=Math.min(W,x1)-sx; if(sw<=0) continue;
+        const d=ctx2d.getImageData(sx,p,sw,1).data;
+        for(let i=0;i<d.length;i+=4){ const b=d[i+2],g=d[i+1],r=d[i]; const db=b-T[0],dg=g-T[1],dr=r-T[2]; if(db*db+dg*dg+dr*dr<TOL2) cnt++; }
+      }
+      if(cnt>bestCnt){ bestCnt=cnt; bestPos=p; }
+    }
+    res.push(bestPos);
+  }
+  return res;
+}
+function extractLines(cnt){
+  const n=cnt.length; const sm=new Float32Array(n);
+  for(let i=0;i<n;i++){ sm[i]=(cnt[Math.max(0,i-1)]+cnt[i]+cnt[Math.min(n-1,i+1)])/3; }
+  // 蓝灰网格线是最高峰，阈值取最高峰的一半，能过滤散乱噪声
+  let mx=0; for(let i=0;i<n;i++) if(sm[i]>mx) mx=sm[i];
+  const th=Math.max(20, mx*0.5);
+  const peaks=[]; let i=0;
+  while(i<n){ if(sm[i]>th){ let j=i; while(j<n&&sm[j]>th) j++; let pk=i; for(let k=i;k<j;k++) if(sm[k]>sm[pk]) pk=k; peaks.push(pk); i=j; } else i++; }
+  const merged=[]; for(const p of peaks){ if(merged.length&&p-merged[merged.length-1]<10){ merged[merged.length-1]=Math.round((merged[merged.length-1]+p)/2); } else merged.push(p); }
+  return merged;
+}
+
+/* ===================== 藏宝图：检测宝图 + 光标 + 坐标 ===================== */
+function btNCC(imgData){ const t=state.bt.iconData.data, s=imgData.data, N=imgData.width*imgData.height;
+  let ms=0,mt=0; for(let i=0;i<N;i++){ ms+=s[i*4]+s[i*4+1]+s[i*4+2]; mt+=t[i*4]+t[i*4+1]+t[i*4+2]; } ms/=N*3; mt/=N*3;
+  let cov=0,vs=0,vt=0; for(let i=0;i<N;i++)for(let k=0;k<3;k++){ const a=s[i*4+k]-ms,b=t[i*4+k]-mt; cov+=a*b;vs+=a*a;vt+=b*b; }
+  if(vs<1e-6||vt<1e-6) return 0; return cov/Math.sqrt(vs*vt); }
+function detectMaps(frame){
+  // 用精修后的图标位置映射到 4×5 格子（比逐格 NCC 更稳）
+  const g=state.bt.grid; if(!g) return 0;
+  state.bt.hasMap.fill(false);
+  const cw=g.w/5, ch=g.h/4, iw2=state.bt.iconWActual/2, ih2=state.bt.iconHActual/2; let cnt=0;
+  for(const p of state.bt.iconPositions){
+    const cx=p.x+iw2, cy=p.y+ih2; // 图标中心
+    const c=Math.floor((cx-g.x)/cw), r=Math.floor((cy-g.y)/ch);
+    if(r<0||r>3||c<0||c>4) continue;
+    const idx=r*5+c; if(!state.bt.hasMap[idx]){ state.bt.hasMap[idx]=true; cnt++; }
+  }
+  return cnt;
+}
+function matchTemplate(frame, tplImg, tplW, tplH, useMask, scale, step, minScore, tplScale, region){
+  tplScale = tplScale || 1;
+  const sw=Math.max(4,Math.round(frame.width*scale)), sh=Math.max(4,Math.round(frame.height*scale));
+  const tw=Math.max(3,Math.round(tplW*scale*tplScale)), th=Math.max(3,Math.round(tplH*scale*tplScale));
+  const fc=document.createElement('canvas'); fc.width=sw; fc.height=sh;
+  const fg=fc.getContext('2d',{willReadFrequently:true}); fg.drawImage(frame,0,0,sw,sh);
+  const fd=fg.getImageData(0,0,sw,sh).data;
+  const tc=document.createElement('canvas'); tc.width=tw; tc.height=th;
+  const tg=tc.getContext('2d',{willReadFrequently:true}); tg.drawImage(tplImg,0,0,tw,th);
+  const td=tg.getImageData(0,0,tw,th).data;
+  const N=tw*th;
+  const mask=new Uint8Array(N); let mn=0;
+  if(useMask){ for(let i=0;i<N;i++){ if(td[i*4]<240||td[i*4+1]<240||td[i*4+2]<240){ mask[i]=1; mn++; } } }
+  else{ for(let i=0;i<N;i++){ mask[i]=1; mn++; } }
+  if(mn<5) return null;
+  let tm=0; for(let i=0;i<N;i++){ if(mask[i]) tm+=td[i*4]+td[i*4+1]+td[i*4+2]; } tm/=mn*3;
+  const tv=new Float32Array(N*3); let tn=0;
+  for(let i=0;i<N;i++){ if(mask[i]){ for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; } } }
+  tn=Math.sqrt(tn);
+  // 搜索区域（可限制在 region 内，降采样坐标），大幅缩小扫描范围提速
+  let sx0=0, sy0=0, sx1=sw, sy1=sh;
+  if(region){
+    sx0=Math.max(0,Math.floor(region.x0*scale)); sy0=Math.max(0,Math.floor(region.y0*scale));
+    sx1=Math.min(sw,Math.ceil(region.x1*scale)); sy1=Math.min(sh,Math.ceil(region.y1*scale));
+  }
+  let bestSc=-1, bestX=0, bestY=0;
+  for(let y=sy0;y+th<=sy1;y+=step){ for(let x=sx0;x+tw<=sx1;x+=step){
+    let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(mask[j*tw+i]){ const idx=((y+j)*sw+(x+i))*4; sm+=fd[idx]+fd[idx+1]+fd[idx+2]; } } sm/=mn*3;
+    let cov=0, sn=0;
+    for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(mask[j*tw+i]){ const idx=((y+j)*sw+(x+i))*4; for(let k=0;k<3;k++){ const sv=fd[idx+k]-sm; cov+=sv*tv[(j*tw+i)*3+k]; sn+=sv*sv; } } }
+    const sc=(sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):0;
+    if(sc>bestSc){ bestSc=sc; bestX=x; bestY=y; }
+  }}
+  if(bestSc<minScore) return null;
+  return {x:Math.round(bestX/scale), y:Math.round(bestY/scale), score:bestSc};
+}
+function detectTooltip(frame){
+  // 识别藏宝图 tooltip 固定部分（标题+描述+类型，精确模板 360×107）
+  // 性能：单尺度（tooltip 与宝图图标同游戏、缩放一致，用 iconWActual 推算）+ 网格附近区域限制
+  if(!state.bt.tooltipImg) return null;
+  const gameScale = (state.bt.iconWActual>8) ? state.bt.iconWActual/98 : (state.bt.lastScale||1);
+  // 搜索区域：tooltip 出现在被悬停宝图附近（下方/右侧），限定在背包网格四周
+  let region=null;
+  if(state.bt.grid){
+    const g=state.bt.grid;
+    region={ x0:Math.max(0,Math.round(g.x-g.w*0.5)), y0:Math.max(0,Math.round(g.y-g.h*0.4)),
+             x1:Math.min(frame.width,Math.round(g.x+g.w*1.6)), y1:Math.min(frame.height,Math.round(g.y+g.h*1.5)) };
+  }
+  let best=null;
+  const scales = (gameScale>0.2&&gameScale<4) ? [gameScale*0.85, gameScale, gameScale*1.15] : [0.4,0.6,0.8,1.0];
+  for(const s of scales){
+    const t=matchTemplate(frame, state.bt.tooltipImg, state.bt.tooltipW, state.bt.tooltipH, false, 0.2, 3, 0.5, s, region);
+    if(t && (!best || t.score>best.score)){ t.scale=s; best=t; }
+  }
+  return best; // {x,y,score,scale} tooltip 固定部分（面板）左上角
+}
+function tooltipToCell(tip){
+  // tooltip 出现在被悬停宝图的下方：找 tooltip 上方最近、x 接近的宝图格子
+  const g=state.bt.grid; if(!g||!tip) return -1;
+  const tipX = tip.x + state.bt.tooltipW*(tip.scale||1)/2;
+  const tipY = tip.y;
+  return coordToCell(tipX, tipY);
+}
+/* 坐标文字中心 (cx,cy) → 反推被悬停宝图格子（坐标文字在被悬停宝图下方） */
+function coordToCell(cx, cy){
+  const g=state.bt.grid; if(!g) return -1;
+  let bestIdx=-1, bestScore=-Infinity;
+  for(let i=0;i<state.bt.iconPositions.length;i++){
+    const p=state.bt.iconPositions[i];
+    const pcx=p.x + state.bt.iconWActual/2, pcy=p.y + state.bt.iconHActual/2;
+    if(pcy >= cy) continue; // 宝图必须在坐标文字上方
+    const dy = cy - pcy;
+    const dx = Math.abs(pcx - cx);
+    const score = -(dy*2 + dx); // y 距离权重更高
+    if(score > bestScore){ bestScore=score; bestIdx=i; }
+  }
+  if(bestIdx<0) return -1;
+  const p=state.bt.iconPositions[bestIdx];
+  const c=Math.floor((p.x + state.bt.iconWActual/2 - g.x)/(g.w/5));
+  const r=Math.floor((p.y + state.bt.iconHActual/2 - g.y)/(g.h/4));
+  if(r<0||r>3||c<0||c>4) return -1;
+  return r*5+c;
+}
+function parseCoord(text){
+  const t=(text||'').replace(/[\s\u3000·•\-—_—]/g,'');
+  // 定位坐标数字：优先括号内「数字,数字」，其次括号内连续数字（逗号丢失），最后无括号「数字,数字」
+  let m;
+  // 1. 括号 + 数字,数字
+  m=t.match(/[（(]\s*(\d{1,4})\s*[,，]\s*(\d{1,4})\s*[)）]?/);
+  if(m){
+    const x=parseInt(m[1],10), y=parseInt(m[2],10);
+    return {name:nameBeforeBracket(t, m.index), x, y};
+  }
+  // 2. 括号 + 连续 4-6 位数字（OCR 丢逗号），智能拆分 x/y
+  m=t.match(/[（(]\s*(\d{4,6})\s*[)）]?/);
+  if(m){
+    const sp=splitCoordNumber(m[1]);
+    if(sp) return {name:nameBeforeBracket(t, m.index), x:sp.x, y:sp.y};
+  }
+  // 3. 无括号 数字,数字（地名可能被拆到别处）
+  m=t.match(/(\d{1,4})\s*[,，]\s*(\d{1,4})/);
+  if(m){
+    const x=parseInt(m[1],10), y=parseInt(m[2],10);
+    return {name:nameBeforeBracket(t, m.index), x, y};
+  }
+  return null;
+}
+/* 从「(」或「,」或数字前取最近的地名（2-5 汉字），优先匹配地名字典（含前导字唯一/包含/首字） */
+function nameBeforeBracket(t, idx){
+  for(let len=5;len>=2;len--){
+    const start=Math.max(0, idx-len);
+    const frag=t.slice(start, idx);
+    if(!/^[\u4e00-\u9fa5]+$/.test(frag)) continue;
+    const corrected=correctMapName(frag);
+    if(MAP_NAMES.includes(corrected)) return corrected;
+  }
+  const frag=t.slice(Math.max(0,idx-4), idx).match(/([\u4e00-\u9fa5]{2,4})$/);
+  return frag?correctMapName(frag[1]):'';
+}
+/* 坐标数字智能拆分：OCR 丢逗号时，把连续 4-6 位数字拆成 x,y（均 ≤999 且不含前导 0） */
+function splitCoordNumber(numStr){
+  const len=numStr.length; const cands=[];
+  for(let i=1;i<len;i++){
+    const xs=numStr.slice(0,i), ys=numStr.slice(i);
+    if(xs.length>3||ys.length>3) continue;
+    const x=parseInt(xs,10), y=parseInt(ys,10);
+    if(x>999||y>999) continue;
+    let score=0;
+    if(!(xs.length>1&&xs[0]==='0')) score+=2; // 非前导0优先
+    if(!(ys.length>1&&ys[0]==='0')) score+=2;
+    score-=Math.abs(xs.length-ys.length); // 位数均衡优先
+    cands.push({x,y,score});
+  }
+  cands.sort((a,b)=>b.score-a.score);
+  return cands.length?{x:cands[0].x,y:cands[0].y}:null;
+}
+/* 梦幻西游常见地图名（宝图坐标地名），用于 OCR 误读纠正 */
+const MAP_NAMES=['建邺城','江南野外','东海湾','长寿郊外','大唐国境','女儿村','普陀山','五庄观','宝象国','傲来国','花果山','北俱芦洲','麒麟山','碗子山','朱紫国','解阳山','小雷音寺','长安城','长寿村','西梁女国','子母河','无底洞','比丘国','七绝山','地府','龙宫','天宫','月宫','狮驼岭','魔王寨','盘丝洞','方寸山','化生寺','大唐官府','龙窟','凤巢','东海龙宫','蓬莱仙岛','墨家村','大雁塔'];
+function correctMapName(raw){
+  const cleaned=(raw||'').replace(/[^\u4e00-\u9fa5]/g,'');
+  if(!cleaned) return raw||'';
+  if(MAP_NAMES.includes(cleaned)) return cleaned;
+  // 包含匹配：候选含字典地名，或字典地名含候选（≥2字）
+  for(const n of MAP_NAMES){ if(cleaned.includes(n)) return n; }
+  for(const n of MAP_NAMES){ if(n.includes(cleaned)&&cleaned.length>=2) return n; }
+  // 首字前缀匹配：候选首字在字典里唯一的以该字开头的地名
+  if(cleaned.length>=1){
+    const matches=MAP_NAMES.filter(n=>n[0]===cleaned[0]);
+    if(matches.length===1) return matches[0];
+    if(matches.length>1){
+      let best=cleaned, bs=0;
+      for(const n of matches){ const s=textSimilarity(cleaned,n); if(s>bs){bs=s;best=n;} }
+      if(bs>0.3) return best;
+    }
+  }
+  // 模糊匹配
+  let best=cleaned, bs=0;
+  for(const n of MAP_NAMES){
+    const s=textSimilarity(cleaned, n);
+    if(s>bs){ bs=s; best=n; }
+  }
+  return bs>0.4 ? best : cleaned;
+}
+async function readFromRegion(frame, x0, y0, w, h){
+  x0=Math.max(0,x0); y0=Math.max(0,y0);
+  w=Math.min(frame.width-x0, w); h=Math.min(frame.height-y0, h);
+  if(w<20||h<15) return null;
+  const crop=document.createElement('canvas'); crop.width=w; crop.height=h;
+  const cg=crop.getContext('2d',{willReadFrequently:true}); cg.drawImage(frame,x0,y0,w,h,0,0,w,h);
+  const d=cg.getImageData(0,0,w,h).data;
+  // 检测绿色像素（G 为最大通道且 G>60，覆盖亮绿/黄绿/暗绿），按 y 聚类成行
+  const rows=[];
+  for(let i=0;i<w*h;i++){
+    const r=d[i*4], g=d[i*4+1], b=d[i*4+2];
+    if(g>60 && g>=r && g>b){
+      const x=i%w, y=(i/w)|0;
+      let found=-1;
+      for(let j=0;j<rows.length;j++){ const R=rows[j]; if(y>=R.minY-10 && y<=R.maxY+10){ found=j; break; } }
+      if(found>=0){ const R=rows[found]; if(x<R.minX)R.minX=x; if(x>R.maxX)R.maxX=x; R.minY=Math.min(R.minY,y); R.maxY=Math.max(R.maxY,y); R.cnt++; }
+      else rows.push({minX:x,maxX:x,minY:y,maxY:y,cnt:1});
+    }
+  }
+  if(!rows.length) return null;
+  rows.sort((a,b)=>a.minY-b.minY);
+  // 逐行 OCR + parseCoord（地名字典过滤，排除聊天/任务文字）
+  for(const R of rows){
+    if(R.cnt<8 || (R.maxX-R.minX)<15 || (R.maxY-R.minY)<8) continue;
+    const pad=5;
+    const bx=Math.max(0,R.minX-pad), by=Math.max(0,R.minY-pad);
+    const bw=Math.min(w-bx, R.maxX-R.minX+1+pad*2), bh=Math.min(h-by, R.maxY-R.minY+1+pad*2);
+    if(bw<12||bh<8) continue;
+    const c2=document.createElement('canvas'); c2.width=bw; c2.height=bh;
+    c2.getContext('2d').drawImage(crop,bx,by,bw,bh,0,0,bw,bh);
+    const text=await ocrOne(preprocessGreen(c2));
+    if(!text) continue;
+    const coord=parseCoord(text);
+    if(coord && coord.name){ return {coord, cx:x0+(R.minX+R.maxX)/2, cy:y0+(R.minY+R.maxY)/2}; }
+  }
+  return null;
+}
+/* 在网格附近（下方/周边）搜绿色坐标文字，返回 {coord, cx, cy}（坐标文字中心，用于反推被悬停格子） */
+async function readCoordinate(frame){
+  const g=state.bt.grid;
+  // 优先网格附近（tooltip 出现在被悬停宝图下方）
+  if(g){
+    const r=await readFromRegion(frame,
+      Math.max(0, Math.round(g.x - g.w*0.5)), Math.max(0, Math.round(g.y - g.h*0.6)),
+      Math.round(g.w*2.0), Math.round(g.h*2.8));
+    if(r) return r;
+  }
+  // 全屏兜底（双开时网格可能定位到另一个背包，但坐标在被操作的背包附近）
+  return await readFromRegion(frame, 0, 0, frame.width, frame.height);
+}
+
+/* ===================== 藏宝图：渲染 + 排序 ===================== */
+function renderBtGrid(){
+  const grid=$('bt-grid'); grid.innerHTML='';
+  for(let r=0;r<4;r++)for(let c=0;c<5;c++){ const idx=r*5+c; const cell=document.createElement('div'); cell.className='bt-cell';
+    const pos=document.createElement('span'); pos.className='pos'; pos.textContent=(r+1)+'-'+(c+1); cell.appendChild(pos);
+    const cd=state.bt.coords[idx];
+    if(cd){ cell.classList.add('coord'); cell.innerHTML='<span class="nm">'+cd.name+'</span><span class="xy">('+cd.x+','+cd.y+')</span>'; }
+    else if(state.bt.hasMap[idx]){ cell.classList.add('has'); cell.innerHTML='<span class="nm">宝图</span>'; }
+    else{ cell.classList.add('gray'); }
+    grid.appendChild(cell); }
+}
+function buildSorted(){
+  const groups=new Map();
+  for(let i=0;i<20;i++){ if(state.bt.coords[i]){ const cd=state.bt.coords[i]; if(!groups.has(cd.name)) groups.set(cd.name,[]); groups.get(cd.name).push({idx:i,...cd}); } }
+  // 同一位置内：按背包格子位置（第1行第1列起、行优先）依次排列
+  for(const arr of groups.values()) arr.sort((a,b)=> a.idx-b.idx);
+  // 位置分组：同位置数量多的在前
+  const sorted=[...groups.entries()].sort((a,b)=> b[1].length-a[1].length);
+  state.bt.sortOrder=[]; for(const [name,arr] of sorted) for(const it of arr) state.bt.sortOrder.push(it.idx);
+  renderSortList();
+}
+function renderSortList(){
+  const list=$('sort-list'); list.innerHTML='';
+  if(!state.bt.sortOrder.length){ list.innerHTML='<div class="note">点击「排序」按钮后按位置归类整理</div>'; return; }
+  state.bt.sortOrder.forEach((idx,order)=>{ const cd=state.bt.coords[idx]; const r=Math.floor(idx/5)+1,c=idx%5+1;
+    const div=document.createElement('div'); div.className='sort-item';
+    div.innerHTML='<span class="order">'+(order+1)+'</span><b>'+cd.name+'</b><span>('+cd.x+','+cd.y+')</span><span class="tag">原格 '+r+'-'+c+'</span>'; list.appendChild(div); });
+}
+
+/* ===================== 藏宝图：实时循环 ===================== */
+async function baotuLoop(){
+  if(!state.streaming||state.activeTab!=='baotu') return;
+  if(state.bt.looping) return; state.bt.looping=true;
+  try{
+    const frame=getFrame(); if(!frame) return;
+    state.bt.loopCount++;
+    // 1. 每轮定位网格（用缓存 scale 快速定位，背包移动/缩放实时跟随）
+    const g=autoLocateGrid(frame);
+    if(g && g.w>40 && g.h>40){ state.bt.grid=g; }
+    if(!state.bt.grid){ $('bt-status').textContent='未定位到背包格子，请把背包界面完整显示在屏幕中'; return; }
+    // 2. 检测宝图
+    const cnt=detectMaps(frame);
+    // 3. 检测绿色坐标文字（tooltip 的坐标行，出现在被悬停宝图下方）；降频省 CPU
+    //    不再依赖 tooltip 模板匹配（模板在 tooltip 未完整弹出时分数低、易漏检）
+    let cr=state.bt._lastCoordResult||null;
+    if(state.bt.loopCount%2===1 && !state.bt.reading){
+      cr=await readCoordinate(frame);
+      state.bt._lastCoordResult=cr;
+    }
+    // 4. 读到坐标 → 反推被悬停宝图格子 → 录入（持久保留，下次悬停更新）
+    let cell=-1;
+    if(cr && cr.coord){
+      // 双开：坐标在被操作的背包附近，若当前主簇不是它，则切换到坐标所属的簇重新定位
+      const targetCl=clusterAtCoord(cr.cx, cr.cy);
+      if(targetCl && targetCl!==state.bt.iconPositions && targetCl.length>=2){
+        state.bt.iconPositions=targetCl;
+        const iw=state.bt.iconWActual||98;
+        const ccx=targetCl.map(p=>p.x+iw/2).sort((a,b)=>a-b);
+        const gx2=medianGap(cluster1d(ccx, iw*0.4));
+        if(gx2&&gx2>0){ state.bt.iconWActual=Math.round(gx2*98/102); state.bt.iconHActual=Math.round(state.bt.iconWActual*100/98); }
+        const g2=inferGrid({positions:targetCl, iconW:state.bt.iconWActual, iconH:state.bt.iconHActual}, frame);
+        if(g2&&g2.w>40){ state.bt.grid=g2; }
+      }
+      cell=coordToCell(cr.cx, cr.cy);
+      if(cell>=0 && state.bt.hasMap[cell]){
+        if(!state.bt.coords[cell] || state.bt.coords[cell].x!==cr.coord.x || state.bt.coords[cell].y!==cr.coord.y || state.bt.coords[cell].name!==cr.coord.name){
+          state.bt.coords[cell]=cr.coord; renderBtGrid();
+        }
+      }
+    }
+    state.bt.cursorCell=cell;
+    // 状态
+    const readCnt=state.bt.coords.filter(Boolean).length;
+    const tipTxt = (cr&&cr.coord) ? ('读取到坐标 '+cr.coord.name+'('+cr.coord.x+','+cr.coord.y+')'+(cell>=0?('，映射第 '+(Math.floor(cell/5)+1)+' 行 '+(cell%5+1)+' 列'):'')) : '未检测到坐标（悬停宝图等待坐标行显示）';
+    $('bt-status').textContent='已识别宝图 '+cnt+' 张，已录入坐标 '+readCnt+' 个；'+tipTxt;
+  }catch(e){ /* 忽略单次错误 */ }
+  finally{ state.bt.looping=false; }
+}
+
+/* ===================== 事件绑定 ===================== */
+$('btn-share').addEventListener('click',startShare);
+$('btn-stop').addEventListener('click',stopShare);
+$('btn-edit').addEventListener('click',()=>{ state.editMode=!state.editMode; $('btn-edit').textContent=state.editMode?'区域编辑':'锁定区域'; });
+$('btn-recognize').addEventListener('click',()=>recognize(true));
+$('auto-toggle').addEventListener('change',toggleAuto);
+$('btn-sort').addEventListener('click',()=>buildSorted());
+window.addEventListener('resize',()=>layout());
+
+/* ===================== 启动 ===================== */
+async function boot(){
+  const bankProgress=$('bank-progress'); $('ocr-status').textContent='正在加载题库（'+bank.length+' 个图标）…';
+  buildDictionary(); await buildTemplates(p=>{ bankProgress.value=p; });
+  $('ocr-status').textContent='题库已加载：'+bank.length+' 个图标，'+state.dictionary.length+' 个技能名';
+  loadBaotuRefs().catch(()=>{});
+  renderBtGrid(); initOCR(); render();
+  // 藏宝图实时循环
+  setInterval(baotuLoop, 600);
+}
+boot();
+})();
+</script>
+</body>
+</html>
