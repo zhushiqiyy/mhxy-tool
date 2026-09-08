@@ -804,24 +804,29 @@ function autoLocateGrid(frame){
    返回 {positions, iconW, iconH, scale}，网格精确位置由蓝灰边框线确定（inferGrid） */
 function detectScale(frame){
   const baseW=state.bt.iconW, baseH=state.bt.iconH;
-  // 覆盖更宽的范围：共享屏幕可能是高分辨率（游戏窗口被放大 2-3 倍）
-  const SCALES=[0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.5,1.7,2.0,2.3,2.6,3.0];
-  const SC0=0.2, d0=downsampleData(frame,SC0);
-  let bestScale=1, bestCount=-1;
+  // 关键修复：scale 档位加密（0.3~1.0 步长 0.05）。真实图标尺度常落在两档之间（如 0.45），
+  // 旧档位 0.4/0.5 都不是最佳，匹配分数偏低导致漏检。加密后能精确命中真实尺度。
+  const SCALES=[0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.15,1.3,1.5,1.7,2.0,2.4,2.8,3.2];
+  const SC0=0.5, d0=downsampleData(frame,SC0);
+  let bestScale=1, bestScore=-1;
   for(const s of SCALES){
     const tw=Math.max(3,Math.round(baseW*SC0*s)), th=Math.max(3,Math.round(baseH*SC0*s));
-    if(tw<6||th<6) continue;             // 模板太小易匹配噪声，跳过
+    if(tw<7||th<7) continue;             // 模板太小易匹配噪声，跳过
     if(tw+2>=d0.w||th+2>=d0.h) continue;
     const td=scaledIconData(tw,th);
-    const ms=scanTemplate(d0.data,d0.w,d0.h,td,tw,th,0.55,3);
-    const cnt=nmsMatches(ms, baseW*0.5*SC0, baseH*0.5*SC0).length;
-    if(cnt>bestCount){ bestCount=cnt; bestScale=s; }
+    // 阈值降到 0.5，配合 NMS 0.4（不合并相邻图标），低分辨率小图标也能检出
+    const ms=scanTemplate(d0.data,d0.w,d0.h,td,tw,th,0.5,3);
+    const kept=nmsMatches(ms, baseW*0.4*SC0, baseH*0.4*SC0);
+    // 用「匹配分数之和」而非「匹配数」选择 scale：真实尺度的分数总和显著更高（相邻档位分数低），
+    // 避免相邻档位匹配数接近时误选。
+    const total=kept.reduce((sum,m)=>sum+m.sc,0);
+    if(total>bestScore){ bestScore=total; bestScale=s; }
   }
   return bestScale;
 }
 function findIconsAtScale(frame, scale, region){
   const baseW=state.bt.iconW, baseH=state.bt.iconH;
-  const SC=0.33, d=downsampleData(frame,SC);
+  const SC=0.5, d=downsampleData(frame,SC);
   const tw=Math.max(4,Math.round(baseW*SC*scale)), th=Math.max(4,Math.round(baseH*SC*scale));
   const td=scaledIconData(tw,th);
   // region 限制扫描范围（降采样坐标系），只扫上次网格附近，大幅提速且避免误检其他区域。
@@ -831,8 +836,10 @@ function findIconsAtScale(frame, scale, region){
     rgn={ x0:Math.max(0,region.x0)*SC, y0:Math.max(0,region.y0)*SC,
           x1:Math.min(frame.width,region.x1)*SC, y1:Math.min(frame.height,region.y1)*SC };
   }
-  const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.40,3,rgn);
-  const coarse=nmsMatches(ms, baseW*0.6*SC, baseH*0.6*SC).slice(0,25).map(m=>({x:Math.round(m.x/SC), y:Math.round(m.y/SC)}));
+  const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.45,3,rgn);
+  // 关键修复：NMS 距离从 baseW*0.6 降到 baseW*0.4（旧值 0.6*baseW≈59px 大于真实图标间距 47px，
+  // 会把相邻图标合并，导致漏检）。0.4*baseW≈39px 小于间距，相邻图标保留。
+  const coarse=nmsMatches(ms, baseW*0.4*SC, baseH*0.4*SC).slice(0,25).map(m=>({x:Math.round(m.x/SC), y:Math.round(m.y/SC)}));
   if(!coarse.length) return {positions:[], iconW:baseW, iconH:baseH};
   // 图标尺寸直接用 scale 推导（NCC 匹配的 scale 是可靠信号），绝不用格子间距 gx 反推。
   const iconW=Math.round(baseW*scale);
@@ -875,7 +882,7 @@ function refineIcons(frame, coarse, iconW, iconH, region){
       const s=nccAt(p.x+dx, p.y+dy);
       if(s>bs){ bs=s; bx=p.x+dx; by=p.y+dy; }
     }
-    if(bs>0.5) out.push({x:bx, y:by, sc:bs});
+    if(bs>0.45) out.push({x:bx, y:by, sc:bs});
   }
   // 按分数排序，去重（精修后同一图标可能重叠）
   out.sort((a,b)=>b.sc-a.sc);
@@ -1019,32 +1026,36 @@ function inferGrid(found, frame){
   if(!gx) gx=iconW*102/98;
   if(!gy || Math.abs(gy-gx)>gx*0.4) gy=gx;
 
-  // 方案1（优先）：图标共识（≥2行且≥2列）——图标是 NCC 匹配的最可靠信号，不依赖边框（图标密集时横线被遮挡）
-  if(positions.length>=4 && cols.length>=2 && rows.length>=2){
-    const Lc=[]; for(const c of cx)for(let k=0;k<5;k++)Lc.push(c-(k+0.5)*gx);
-    const Tc=[]; for(const c of cy)for(let k=0;k<4;k++)Tc.push(c-(k+0.5)*gy);
-    const left=consensus(Lc,gx), top=consensus(Tc,gy);
-    if(left!=null&&top!=null) return {x:Math.round(left), y:Math.round(top), w:Math.round(gx*5), h:Math.round(gy*4)};
-  }
-  // 方案2（兜底）：蓝灰边框线确定绝对位置（单行/单列场景，图标少时边框仍可见）
-  if(frame){
+  // 主方案：外推（最左/最上图标中心 − 0.5*gx 作为网格原点）。
+  // 简单可靠，稀疏图标/缺列时也不偏移。旧的 consensus 在缺列时会把最左图标误判为第2/3列，
+  // 导致网格整体左移（实测 5 图标缺第2列时 consensus 返回 x=307，正确应是 354，偏 47px）。
+  // 外推的前提是「最左图标在网格第1列附近」，背包场景下宝图通常分布到多列，最左图标≈第1列，满足。
+  let left = Math.min(...cx) - gx/2;
+  let top = Math.min(...cy) - gy/2;
+
+  // 边框校正：若检测到可靠的蓝灰竖/横线，用边框线确定绝对位置（比外推更准，尤其最左图标不在第1列时）
+  if(frame && positions.length>=2){
     const minX=Math.min(...positions.map(p=>p.x)), maxX=Math.max(...positions.map(p=>p.x+iconW));
     const minY=Math.min(...positions.map(p=>p.y)), maxY=Math.max(...positions.map(p=>p.y+iconH));
-    const region={x0:Math.round(minX-gx*3), y0:Math.round(minY-gy*3), x1:Math.round(maxX+gx*3), y1:Math.round(maxY+gy*3)};
+    const region={x0:Math.round(minX-gx*2), y0:Math.round(minY-gy*2), x1:Math.round(maxX+gx*2), y1:Math.round(maxY+gy*2)};
     const border=detectBorder(frame, region);
     const bv = findEvenLines(border.vlines, gx);
     const bh = findEvenLines(border.hlines, gy);
-    if(bv.length>=2 && bh.length>=2){
-      // 蓝灰竖线含格子0左边界（bv[0]），横线含格子0顶边界（bh[0]）
-      return {x:Math.round(bv[0]), y:Math.round(bh[0]), w:Math.round(gx*5), h:Math.round(gy*4)};
+    // 竖线校正左边界：找最接近外推 left 的竖线（避免面板边缘等噪声）
+    if(bv.length>=2){
+      let bestV=null, bestVD=Infinity;
+      for(const v of bv){ const d=Math.abs(v-left); if(d<bestVD && d<gx*1.5){ bestVD=d; bestV=v; } }
+      if(bestV!=null) left=bestV;
+    }
+    // 横线校正顶边界
+    if(bh.length>=2){
+      let bestH=null, bestHD=Infinity;
+      for(const h of bh){ const d=Math.abs(h-top); if(d<bestHD && d<gy*1.5){ bestHD=d; bestH=h; } }
+      if(bestH!=null) top=bestH;
     }
   }
-  // 方案3：仅按图标外推（至少1个图标，按最左/最上为基准外推完整网格）
-  if(positions.length>=1){
-    const left=Math.min(...cx)-gx/2, top=Math.min(...cy)-gy/2;
-    return {x:Math.round(left), y:Math.round(top), w:Math.round(gx*5), h:Math.round(gy*4)};
-  }
-  return null;
+
+  return {x:Math.round(left), y:Math.round(top), w:Math.round(gx*5), h:Math.round(gy*4)};
 }
 function findEvenLines(lines, gap){
   lines=[...lines].sort((a,b)=>a-b);
