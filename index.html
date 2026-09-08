@@ -273,13 +273,14 @@ $('sidebar-jieri').style.display = 'flex';
 /* ===================== 区域（教师节） ===================== */
 function defaultRegions(){
   return {
-    // 看图说话图标居中偏上；4 个选项 2×2 在下方（区域缩小，精确框住技能名文字，减少边框/背景干扰 OCR）
-    icon:{x:0.32,y:0.42,w:0.36,h:0.16}, opt1:{x:0.30,y:0.58,w:0.16,h:0.06},
-    opt2:{x:0.54,y:0.58,w:0.16,h:0.06}, opt3:{x:0.30,y:0.66,w:0.16,h:0.06}, opt4:{x:0.54,y:0.66,w:0.16,h:0.06},
+    // 看图说话大图标在答题框上部（标题"看图说话"下方、提示文字上方），4 个选项 2×2 在下方
+    // （坐标按 1.png 实测：大图标约 x450-850/y530-640，选项左列 x440-650、右列 x740-920，上行 y760-830、下行 y860-930）
+    icon:{x:0.23,y:0.39,w:0.20,h:0.09}, opt1:{x:0.22,y:0.56,w:0.11,h:0.05},
+    opt2:{x:0.38,y:0.56,w:0.11,h:0.05}, opt3:{x:0.22,y:0.63,w:0.11,h:0.05}, opt4:{x:0.38,y:0.63,w:0.11,h:0.05},
   };
 }
-function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions_v2'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
-function saveRegions(){ try{ localStorage.setItem('mhxy_regions_v2', JSON.stringify(state.regions)); }catch(e){} }
+function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions_v3'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
+function saveRegions(){ try{ localStorage.setItem('mhxy_regions_v3', JSON.stringify(state.regions)); }catch(e){} }
 
 /* ===================== 题库（教师节） ===================== */
 const bank = window.QUESTION_BANK || [];
@@ -502,11 +503,13 @@ function autoTrim(srcCanvas){
     c.getContext('2d').drawImage(srcCanvas,minX,minY,fw,fh,0,0,c.width,c.height); return c; }
   return srcCanvas;
 }
-function matchIcon(crop){
+function matchIcon(crop, indices){
   const S=64; const norm=document.createElement('canvas'); norm.width=S;norm.height=S;
   const ng=norm.getContext('2d',{willReadFrequently:true}); ng.drawImage(crop,0,0,S,S); const np=ng.getImageData(0,0,S,S).data;
   let bestIdx=-1,bestScore=-2;
-  for(let i=0;i<state.templates.length;i++){ const t=state.templates[i]; if(t.n<20) continue;
+  // 若指定 indices（如四个选项候选），只在这些里匹配，区分度大幅提高；否则全量匹配
+  const list = indices && indices.length ? indices : state.templates.map((_,i)=>i);
+  for(let k=0;k<list.length;k++){ const i=list[k]; const t=state.templates[i]; if(!t||t.n<20) continue;
     // 形状匹配为主（灰度 NCC，比较图标内部图形轮廓/明暗），颜色直方图辅助（区分同形异色如「破釜沉舟」）
     const shape=grayNCC(np,t); const color=histCorr(histOfCrop(np,t.mask),t.hist); const sc=0.7*shape+0.3*color;
     if(sc>bestScore){ bestScore=sc; bestIdx=i; } }
@@ -588,21 +591,61 @@ function findAnswer(optionTexts,correctName){ let bestI=-1,bestScore=0;
 
 /* ===================== 教师节：识别流程 ===================== */
 async function ocrOptions(frame){ const texts=[]; for(let i=1;i<=4;i++){ texts.push(await ocrOne(preprocessForOCR(cropRegion(frame,state.regions['opt'+i])))); } return texts; }
+/* 用候选图标（四个选项的技能名）在答题框附近自动定位大图标，返回最佳匹配 {index,score,x,y,w,h} */
+async function locateIcon(frame, indices){
+  // 搜索区域：当前 icon 区域外扩（跟随「看图说话」框移动，避免误匹配技能栏等游戏 UI）
+  const r=state.regions.icon;
+  const cx=r.x+r.w/2, cy=r.y+r.h/2;
+  const region={ x0:Math.max(0,(cx-r.w*1.5))*frame.width, y0:Math.max(0,(cy-r.h*2.2))*frame.height,
+                x1:Math.min(frame.width,(cx+r.w*1.5))*frame.width, y1:Math.min(frame.height,(cy+r.h*2.2))*frame.height };
+  const best={index:-1,score:-2,x:0,y:0,w:0,h:0,s:1};
+  for(const i of indices){
+    const img=new Image(); img.src=bank[i].icon;
+    await new Promise(r=>{ img.onload=r; img.onerror=r; });
+    const iw=img.naturalWidth, ih=img.naturalHeight; if(!iw) continue;
+    // 大图标在游戏里约 0.9~2.0 倍原始尺寸，多尺度匹配
+    for(const s of [0.9,1.1,1.3,1.6,2.0]){
+      const m=matchTemplate(frame,img,iw,ih,false,0.5,2,0.30,s,region);
+      if(m && m.score>best.score){ best.index=i; best.score=m.score; best.x=m.x; best.y=m.y; best.s=s; best.w=Math.round(iw*s); best.h=Math.round(ih*s); }
+    }
+  }
+  return best;
+}
 async function recognize(manual){
   if(!state.streaming||!video.videoWidth) return; if(state.recognizing) return; state.recognizing=true;
   try{
     const frame=getFrame(); if(!frame){ state.recognizing=false; return; }
-    let crop=cropRegion(frame,state.regions.icon); crop=autoTrim(crop); const match=matchIcon(crop); showResult(match,crop);
+    // 1. 先 OCR 四个选项（缩小候选范围，提高大图标匹配区分度）
+    $('ocr-status').textContent='正在识别四个选项…';
+    const texts=await ocrOptions(frame);
+    const names=texts.map(t=>bestDictMatch(t).name);
+    const indices=[]; for(const n of names){ if(!n) continue; const i=bank.findIndex(d=>d.name===n); if(i>=0) indices.push(i); }
+    // 2. 匹配大图标：优先用候选图标自动定位（跟随「看图说话」框移动），失败则用当前 icon 区域兜底
+    let match;
+    if(indices.length>=2){
+      const loc=await locateIcon(frame, indices);
+      if(loc.index>=0 && loc.score>0.45){
+        // 自动定位成功：更新 icon 区域（归一化），大图标 = 候选里分数最高的
+        state.regions.icon={ x:loc.x/frame.width, y:loc.y/frame.height, w:loc.w/frame.width, h:loc.h/frame.height };
+        match={ index:loc.index, name:bank[loc.index].name, category:bank[loc.index].category, color:bank[loc.index].color, score:loc.score };
+      } else {
+        const crop=cropRegion(frame,state.regions.icon); crop=autoTrim(crop); match=matchIcon(crop, indices);
+      }
+    } else {
+      const crop=cropRegion(frame,state.regions.icon); crop=autoTrim(crop); match=matchIcon(crop);
+    }
+    showResult(match, match.index>=0?cropRegion(frame,state.regions.icon):null);
+    // 3. 答案
     if(match.index>=0){ const hash=String(match.index);
-      if(manual||hash!==state.lastIconHash){ state.lastIconHash=hash; $('ocr-status').textContent='正在识别四个选项…';
-        const texts=await ocrOptions(frame); const ans=findAnswer(texts,match.name); state.lastAnswer=ans.index>=0?ans.index+1:null;
+      if(manual||hash!==state.lastIconHash){ state.lastIconHash=hash;
+        const ans=findAnswer(texts,match.name); state.lastAnswer=ans.index>=0?ans.index+1:null;
         renderOptions(ans.details,match.name,ans.index); $('ocr-status').textContent=state.lastAnswer?('已识别：选项 '+state.lastAnswer):'未找到匹配选项'; } }
     else{ $('ocr-status').textContent='未匹配到图标，请调整图标区域'; }
   }catch(e){ $('ocr-status').textContent='识别出错：'+(e&&e.message?e.message:e); }
   finally{ state.recognizing=false; }
 }
 function showResult(match,crop){ const rc=$('result-icon'),rg=rc.getContext('2d'); rg.clearRect(0,0,56,56);
-  if(match.index>=0){ rg.drawImage(crop,0,0,56,56); $('result-name').textContent=match.name; $('result-meta').textContent=match.category+' · '+match.color;
+  if(match.index>=0){ if(crop) rg.drawImage(crop,0,0,56,56); $('result-name').textContent=match.name; $('result-meta').textContent=match.category+' · '+match.color;
     const sc=(match.score+1)/2; $('score-fill').style.width=Math.round(sc*100)+'%'; $('score-text').textContent=(sc*100).toFixed(1)+'%'; }
   else{ $('result-name').textContent='未匹配'; $('result-meta').textContent='请调整图标区域'; $('score-fill').style.width='0%'; $('score-text').textContent='—'; } }
 function renderOptions(details,correctName,hitIndex){ const list=$('opt-list'); list.innerHTML='';
