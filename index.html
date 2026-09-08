@@ -657,38 +657,37 @@ function detectScale(frame){
 }
 function findIconsAtScale(frame, scale, region){
   const baseW=state.bt.iconW, baseH=state.bt.iconH;
-  const SC=0.33, d0=downsampleData(frame,SC);
-  // region 限制：只扫描上次网格附近（±3 格），大幅提速（背包移动时只要不超边距即可跟上）
-  let d=d0, ox=0, oy=0;
-  if(region && region.x1-region.x0>60 && region.y1-region.y0>60){
-    const rx=Math.max(0,Math.round(region.x0)), ry=Math.max(0,Math.round(region.y0));
-    const rw=Math.min(frame.width-rx, Math.round(region.x1-region.x0));
-    const rh=Math.min(frame.height-ry, Math.round(region.y1-region.y0));
-    if(rw>60 && rh>60){
-      const crop=document.createElement('canvas'); crop.width=rw; crop.height=rh;
-      crop.getContext('2d',{willReadFrequently:true}).drawImage(frame,rx,ry,rw,rh,0,0,rw,rh);
-      d=downsampleData(crop,SC);
-      ox=rx; oy=ry;
-    }
-  }
+  const SC=0.33, d=downsampleData(frame,SC);
   const tw=Math.max(4,Math.round(baseW*SC*scale)), th=Math.max(4,Math.round(baseH*SC*scale));
   const td=scaledIconData(tw,th);
-  // 分步降采样 + SC=0.33 提升匹配质量，阈值 0.45（实测运行7：13 个图标全命中，误检少）
-  const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.45,3);
-  const coarse=nmsMatches(ms, baseW*0.6*SC, baseH*0.6*SC).slice(0,25).map(m=>({x:Math.round(m.x/SC)+ox, y:Math.round(m.y/SC)+oy}));
+  // region 限制扫描范围（降采样坐标系），只扫上次网格附近，大幅提速且避免误检其他区域。
+  // 注意：不做裁剪（裁剪会引入 ±3px 坐标偏移并漏检边界行），而是全帧降采样后限制 scanTemplate 扫描窗口。
+  let rgn=null;
+  if(region && region.x1-region.x0>60 && region.y1-region.y0>60){
+    rgn={ x0:Math.max(0,region.x0)*SC, y0:Math.max(0,region.y0)*SC,
+          x1:Math.min(frame.width,region.x1)*SC, y1:Math.min(frame.height,region.y1)*SC };
+  }
+  const ms=scanTemplate(d.data,d.w,d.h,td,tw,th,0.45,3,rgn);
+  const coarse=nmsMatches(ms, baseW*0.6*SC, baseH*0.6*SC).slice(0,25).map(m=>({x:Math.round(m.x/SC), y:Math.round(m.y/SC)}));
   if(!coarse.length) return {positions:[], iconW:baseW, iconH:baseH};
   // 图标尺寸直接用 scale 推导（NCC 匹配的 scale 是可靠信号），绝不用格子间距 gx 反推。
   const iconW=Math.round(baseW*scale);
   const iconH=Math.round(baseH*scale);
   // 全分辨率精修：消除降采样粗定位误差（网格原点偏移的主因之一）
-  const refined = refineIcons(frame, coarse, iconW, iconH);
+  const refined = refineIcons(frame, coarse, iconW, iconH, region);
   return {positions:refined, iconW, iconH};
 }
-/* 全分辨率精修图标位置：对每个粗图标在 ±2px 内做 NCC 精搜，并过滤低分误检 */
-function refineIcons(frame, coarse, iconW, iconH){
+/* 全分辨率精修图标位置：对每个粗图标在 ±2px 内做 NCC 精搜，并过滤低分误检。region 内读取像素（大幅减少 getImageData 开销） */
+function refineIcons(frame, coarse, iconW, iconH, region){
   if(!coarse.length) return coarse;
-  const W=frame.width, H=frame.height;
-  const fdata=frame.getContext('2d',{willReadFrequently:true}).getImageData(0,0,W,H).data;
+  let ox=0, oy=0, W=frame.width, H=frame.height;
+  if(region && region.x1-region.x0>60 && region.y1-region.y0>60){
+    ox=Math.max(0,Math.round(region.x0)); oy=Math.max(0,Math.round(region.y0));
+    W=Math.min(frame.width, Math.round(region.x1))-ox;
+    H=Math.min(frame.height, Math.round(region.y1))-oy;
+    if(W<iconW||H<iconH){ ox=0; oy=0; W=frame.width; H=frame.height; }
+  }
+  const fdata=frame.getContext('2d',{willReadFrequently:true}).getImageData(ox,oy,W,H).data;
   const tc=document.createElement('canvas'); tc.width=iconW; tc.height=iconH;
   const tg=tc.getContext('2d',{willReadFrequently:true}); tg.drawImage(state.bt.iconImg,0,0,iconW,iconH);
   const td=tg.getImageData(0,0,iconW,iconH).data;
@@ -698,10 +697,11 @@ function refineIcons(frame, coarse, iconW, iconH){
   for(let i=0;i<N;i++)for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; }
   tn=Math.sqrt(tn);
   function nccAt(x,y){
-    if(x<0||y<0||x+iconW>W||y+iconH>H) return -1;
-    let sm=0; for(let j=0;j<iconH;j++)for(let i=0;i<iconW;i++){ const idx=((y+j)*W+(x+i))*4; sm+=fdata[idx]+fdata[idx+1]+fdata[idx+2]; } sm/=N*3;
+    const lx=x-ox, ly=y-oy;
+    if(lx<0||ly<0||lx+iconW>W||ly+iconH>H) return -1;
+    let sm=0; for(let j=0;j<iconH;j++)for(let i=0;i<iconW;i++){ const idx=((ly+j)*W+(lx+i))*4; sm+=fdata[idx]+fdata[idx+1]+fdata[idx+2]; } sm/=N*3;
     let cov=0,sn=0;
-    for(let j=0;j<iconH;j++)for(let i=0;i<iconW;i++){ const idx=((y+j)*W+(x+i))*4; for(let k=0;k<3;k++){ const sv=fdata[idx+k]-sm; cov+=sv*tv[(j*iconW+i)*3+k]; sn+=sv*sv; } }
+    for(let j=0;j<iconH;j++)for(let i=0;i<iconW;i++){ const idx=((ly+j)*W+(lx+i))*4; for(let k=0;k<3;k++){ const sv=fdata[idx+k]-sm; cov+=sv*tv[(j*iconW+i)*3+k]; sn+=sv*sv; } }
     return (sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):-1;
   }
   const R=2, out=[];
@@ -810,13 +810,19 @@ function scaledIconData(tw,th){
   tc.getContext('2d').drawImage(state.bt.iconImg,0,0,tw,th);
   return tc.getContext('2d').getImageData(0,0,tw,th).data;
 }
-function scanTemplate(data,w,h,td,tw,th,thr,step){
+function scanTemplate(data,w,h,td,tw,th,thr,step,region){
   const N=tw*th; let tm=0; for(let i=0;i<N;i++){ tm+=td[i*4]+td[i*4+1]+td[i*4+2]; } tm/=N*3;
   const tv=new Float32Array(N*3); let tn=0;
   for(let i=0;i<N;i++)for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; }
   tn=Math.sqrt(tn);
+  // region 限制扫描范围（降采样坐标系），大幅提速
+  let sx0=0, sy0=0, sx1=w, sy1=h;
+  if(region){
+    sx0=Math.max(0, Math.floor(region.x0)); sy0=Math.max(0, Math.floor(region.y0));
+    sx1=Math.min(w, Math.ceil(region.x1)); sy1=Math.min(h, Math.ceil(region.y1));
+  }
   const out=[];
-  for(let y=0;y+th<=h;y+=step)for(let x=0;x+tw<=w;x+=step){
+  for(let y=sy0;y+th<=sy1;y+=step)for(let x=sx0;x+tw<=sx1;x+=step){
     let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*w+(x+i))*4; sm+=data[idx]+data[idx+1]+data[idx+2]; } sm/=N*3;
     let cov=0,sn=0;
     for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*w+(x+i))*4; for(let k=0;k<3;k++){ const sv=data[idx+k]-sm; cov+=sv*tv[(j*tw+i)*3+k]; sn+=sv*sv; } }
@@ -839,8 +845,8 @@ function inferGrid(found, frame){
   // 聚类为不同列/行，再求格子间距。格子间距独立于图标尺寸（「道具行囊」等标签页格子远大于图标，比例可到 2 以上）
   const cols = cluster1d(cx, iconW*0.5), rows = cluster1d(cy, iconH*0.5);
   // 用「最长等间距序列」求格子间距（比中位数更抗误检：误检图标会把间距拆成两半，中位数会被污染）
-  let gx = bestGap(cols, iconW*0.8, iconW*3.0);
-  let gy = bestGap(rows, iconH*0.8, iconH*3.0);
+  let gx = bestGap(cols, iconW*0.9, iconW*1.4);
+  let gy = bestGap(rows, iconH*0.9, iconH*1.4);
   if(!gx) gx=iconW*102/98;
   if(!gy || Math.abs(gy-gx)>gx*0.4) gy=gx;
 
@@ -1309,7 +1315,7 @@ async function boot(){
   loadBaotuRefs().catch(()=>{});
   renderBtGrid(); initOCR(); render();
   // 藏宝图实时循环
-  setInterval(baotuLoop, 600);
+  setInterval(baotuLoop, 900);
 }
 boot();
 })();
