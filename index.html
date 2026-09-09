@@ -595,61 +595,6 @@ async function slideMatch(crop, iconDataUrl){
   }
   return best;
 }
-/* 深色增强滑窗匹配：只比较「深色元素」的形状（亮色主体压平），用于蓝色剧情技能的二次识别。
-   蓝色剧情技能（变化之术/古董评估/火眼金睛/仙灵店铺等）主体都是蓝色，靠深色细节区分。
-   深色增强：灰度 lum = 0.299R+0.587G+0.114B，深色值 = max(0, 128-lum)，即越暗的像素值越大、亮色归零。
-   模板用 alpha mask 排除透明背景（透明黑 RGB 0,0,0 会被误判成"最强深色信号"）。 */
-async function slideMatchDark(crop, iconDataUrl){
-  const img=new Image(); img.src=iconDataUrl;
-  await new Promise(r=>{ img.onload=r; img.onerror=r; });
-  const iw=img.naturalWidth, ih=img.naturalHeight;
-  if(!iw||!ih) return -2;
-  const cw=crop.width, ch=crop.height;
-  if(cw<8||ch<8) return -2;
-  const cdata=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,cw,ch).data;
-  // crop 深色增强灰度（单通道）
-  const cgray=new Float32Array(cw*ch);
-  for(let i=0;i<cw*ch;i++){
-    const r=cdata[i*4], g=cdata[i*4+1], b=cdata[i*4+2];
-    const lum=0.299*r+0.587*g+0.114*b;
-    cgray[i]=Math.max(0, 128-lum);
-  }
-  let best=-2;
-  const scales=[1.0,1.3,1.6,2.0,2.5,3.0,3.8];
-  for(const s of scales){
-    const tw=Math.max(4,Math.round(iw*s)), th=Math.max(4,Math.round(ih*s));
-    if(tw>cw || th>ch) continue;
-    const tc=document.createElement('canvas'); tc.width=tw; tc.height=th;
-    const tg=tc.getContext('2d'); tg.drawImage(img,0,0,tw,th);
-    const td=tg.getImageData(0,0,tw,th).data;
-    const N=tw*th;
-    // 模板：深色增强灰度 + alpha mask（排除透明背景）
-    const tmask=new Uint8Array(N); const tval=new Float32Array(N);
-    let mn=0;
-    for(let i=0;i<N;i++){
-      if(td[i*4+3]>40){
-        const r=td[i*4], g=td[i*4+1], b=td[i*4+2];
-        const lum=0.299*r+0.587*g+0.114*b;
-        tval[i]=Math.max(0, 128-lum);
-        tmask[i]=1; mn++;
-      }
-    }
-    if(mn<12) continue;
-    let tm=0; for(let i=0;i<N;i++){ if(tmask[i]) tm+=tval[i]; } tm/=mn;
-    const tv=new Float32Array(N); let tn=0;
-    for(let i=0;i<N;i++){ if(tmask[i]){ const v=tval[i]-tm; tv[i]=v; tn+=v*v; } }
-    tn=Math.sqrt(tn);
-    const step=2;
-    for(let y=0;y+th<=ch;y+=step){ for(let x=0;x+tw<=cw;x+=step){
-      let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]) sm+=cgray[(y+j)*cw+(x+i)]; } sm/=mn;
-      let cov=0,sn=0;
-      for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]){ const sv=cgray[(y+j)*cw+(x+i)]-sm; cov+=sv*tv[j*tw+i]; sn+=sv*sv; } }
-      const sc=(sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):0;
-      if(sc>best) best=sc;
-    }}
-  }
-  return best;
-}
 /* 计算 crop 内「前景的深色占比」：与模板 darkFill 同口径（前景=非背景非蓝框，深色=lum<80）。
    用于区分蓝色剧情技能的深色形状差异（变化之术深色方形占比高、仙灵店铺左上角浅蓝占比低）。 */
 function darkFillOfCrop(crop){
@@ -682,36 +627,27 @@ async function matchIcon(crop, indices){
   }
   // 只在这些候选里匹配（四个选项）；调用方保证 indices 非空，此处仍做兜底
   const list = indices && indices.length ? indices : state.templates.map((_,i)=>i);
+  // 深色占比（一次性计算，O(1)）：蓝色剧情技能靠深色形状区分（变化之术深色方形占比高、仙灵店铺左上角浅蓝占比低），
+  // 暗绿门派技能同理（水遁 vs 纵地金光深色占比也有差异）。深色占比是快速、确定性的形状特征。
+  const cropFill = darkFillOfCrop(work);
   let bestIdx=-1,bestScore=-2,secondScore=-2;
-  const normScores = new Map(); // 记录各候选的 normal 分数，供二次识别综合
   for(const i of list){
-    const sc = await slideMatch(work, bank[i].icon);
-    normScores.set(i, sc);
+    let sc = await slideMatch(work, bank[i].icon);
+    // 一次性融合深色占比（不再二次跳转）：蓝/暗绿技能用深色形状辅助区分。
+    // 关键改进：旧逻辑先 normal 出结果、再二次识别改结果，用户看到结果「跳转」；
+    // 现改为单次决策、跨帧稳定，且去掉 slideMatchDark（多尺度滑窗，最慢的部分）大幅提速。
+    const col = bank[i].color;
+    if(col==='蓝色' || col==='暗绿色'){
+      const tplFill = state.templates[i].darkFill || 0;
+      const fillMatch = 1 - Math.min(1, Math.abs(cropFill - tplFill)/0.15);
+      sc = 0.75*sc + 0.25*fillMatch;
+    }
     if(sc>bestScore){ secondScore=bestScore; bestScore=sc; bestIdx=i; }
     else if(sc>secondScore) secondScore=sc;
   }
   // 置信度下限：分数过低说明框没对准图标（背景/乱码），判定「未匹配」，不输出结果
   const MIN_SCORE = 0.20;
   if(bestIdx<0 || bestScore<MIN_SCORE) return {index:-1,name:'',category:'',color:'',score:bestScore,secondScore};
-  // 二次识别：蓝色剧情技能（变化之术/古董评估/火眼金睛/仙灵店铺等）主体都是蓝色，仅靠 RGB NCC 区分度不足。
-  // 它们深色元素不同，当 top1 是剧情技能、且与次高候选差距小（<0.06，区分度不足）时，
-  // 用「深色增强」重新匹配（只比较深色形状，亮色主体压平），综合 normal 与 dark 分数。
-  if(bank[bestIdx].category==='剧情技能' && (bestScore-secondScore)<0.06){
-    // 深色形状特征：变化之术深色围成方形（占比高）、仙灵店铺左上角浅蓝多（占比低），
-    // 深色占比是区分蓝色剧情技能的最可靠特征（实测 0.648 vs 0.568，差 14%）。
-    const cropFill = darkFillOfCrop(work);
-    let bestIdx2=-1, bestScore2=-2;
-    for(const i of list){
-      if(bank[i].category!=='剧情技能') continue;
-      const n = normScores.get(i)!=null ? normScores.get(i) : -2;
-      const dk = await slideMatchDark(work, bank[i].icon);
-      const tplFill = state.templates[i].darkFill || 0;
-      const fillMatch = 1 - Math.min(1, Math.abs(cropFill - tplFill)/0.15); // 深色占比越接近越像
-      const fin = 0.45*n + 0.30*dk + 0.25*fillMatch; // normal 主导 + 深色增强 + 深色形状
-      if(fin>bestScore2){ bestScore2=fin; bestIdx2=i; }
-    }
-    if(bestIdx2>=0){ bestIdx=bestIdx2; bestScore=bestScore2; }
-  }
   return {index:bestIdx,name:bank[bestIdx].name,category:bank[bestIdx].category,color:bank[bestIdx].color,score:bestScore,secondScore};
 }
 /* 计算 crop 的 HSV 色相直方图（16 bins，只用有颜色像素），与模板预计算的 hueHist 做相关 */
