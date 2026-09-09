@@ -282,16 +282,16 @@ $('sidebar-jieri').style.display = 'flex';
 /* ===================== 区域（教师节） ===================== */
 function defaultRegions(){
   return {
-    // 按 8.png（3813×1779，用户手动调好的最终布局）实测：看图说话大图标在框左侧（约 x817-966/y682-861），
-    // 4 个选项 2×2 在下方（技能名文字约 y1071/1268）。图标框略大于图标以完整显示；选项框紧贴技能名文字。
-    // （坐标均为归一化比例，共享窗口固定后，背景与图标/选项的相对位置不变）
-    icon:{x:0.214,y:0.383,w:0.039,h:0.101},
+    // 按 8.png（3813×1779，用户手动调好的最终布局）实测：看图说话大图标在框左侧，4 个选项 2×2 在下方。
+    // 关键：图标框是「正方形」（8.png 下约 150×150 像素，w=150/3813≈0.039、h=150/1779≈0.084），
+    // 略大于图标、四边等距——避免矩形框拉伸图标导致变形+匹配分数下降。
+    icon:{x:0.214,y:0.391,w:0.039,h:0.084},
     opt1:{x:0.248,y:0.598,w:0.045,h:0.030}, opt2:{x:0.400,y:0.598,w:0.045,h:0.030},
     opt3:{x:0.248,y:0.709,w:0.045,h:0.030}, opt4:{x:0.400,y:0.709,w:0.045,h:0.030},
   };
 }
-function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions_v5'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
-function saveRegions(){ try{ localStorage.setItem('mhxy_regions_v5', JSON.stringify(state.regions)); }catch(e){} }
+function loadRegions(){ try{ const s=localStorage.getItem('mhxy_regions_v6'); if(s) return Object.assign(defaultRegions(),JSON.parse(s)); }catch(e){} return defaultRegions(); }
+function saveRegions(){ try{ localStorage.setItem('mhxy_regions_v6', JSON.stringify(state.regions)); }catch(e){} }
 
 /* ===================== 题库（教师节） ===================== */
 const bank = window.QUESTION_BANK || [];
@@ -508,6 +508,12 @@ canvas.addEventListener('mousemove',e=>{
   const dx=(e.offsetX-d.startX)/d.cr.w, dy=(e.offsetY-d.startY)/d.cr.h;
   const r=state.regions[d.key];
   if(d.op==='move'){ r.x=clamp(d.orig.x+dx,0,1-r.w); r.y=clamp(d.orig.y+dy,0,1-r.h); }
+  else if(d.key==='icon'){
+    // 图标框 resize 时保持「正方形」（像素宽高相等），四边与图标边缘等距，
+    // 避免拖成矩形导致图标拉伸变形 + 匹配分数下降。
+    const nw=clamp(d.orig.w+dx,0.02,1-r.x);
+    r.w=nw; r.h=clamp(nw*d.cr.w/d.cr.h, 0.02, 1-r.y);
+  }
   else{ r.w=clamp(d.orig.w+dx,0.02,1-r.x); r.h=clamp(d.orig.h+dy,0.02,1-r.y); }
   saveRegions();
 });
@@ -550,7 +556,14 @@ function matchIcon(crop, indices){
   // 先裁剪掉背景边缘（图标框可略大于图标，autoTrim 去掉四周背景让图标填满，提高 NCC 重合度）
   crop=autoTrim(crop);
   const S=64; const norm=document.createElement('canvas'); norm.width=S;norm.height=S;
-  const ng=norm.getContext('2d',{willReadFrequently:true}); ng.drawImage(crop,0,0,S,S); const np=ng.getImageData(0,0,S,S).data;
+  const ng=norm.getContext('2d',{willReadFrequently:true});
+  // 关键修复：等比缩放 + 居中（与 loadIconAsData 完全一致），而不是 drawImage(crop,0,0,S,S) 强制拉伸。
+  // 旧代码把矩形裁剪区非等比拉伸成 64×64，图标被拉伸变形，与等比缩放的模板形状不匹配，
+  // NCC/色相分数下降——这是「打坐/调息/反间之计等图标反复识别错误」+「识别结果图标变形」的根因。
+  const cw=crop.width, ch=crop.height;
+  const sc=Math.min(S/cw, S/ch);
+  ng.drawImage(crop, (S-cw*sc)/2, (S-ch*sc)/2, cw*sc, ch*sc);
+  const np=ng.getImageData(0,0,S,S).data;
   let bestIdx=-1,bestScore=-2;
   // 若指定 indices（如四个选项候选），只在这些里匹配，区分度大幅提高；否则全量匹配
   const list = indices && indices.length ? indices : state.templates.map((_,i)=>i);
@@ -758,30 +771,17 @@ async function autoLocateJieri(){
       r.x=clamp(o.x0/frame.width-pad,0,1); r.y=clamp(o.y0/frame.height-pad,0,1);
       r.w=clamp((o.x1-o.x0)/frame.width+pad*2,0.02,1); r.h=clamp((o.y1-o.y0)/frame.height+pad*2,0.02,1);
     }
-    // 4. 图标框：用候选（4 个技能名）在「提示文字左侧 + 下方」匹配大图标。
-    //    关键：大图标在「看图说话」框的左下角（提示文字左侧），不在提示文字正下方——之前搜错方向导致定位失败。
-    const optTop=Math.min(...opts.map(o=>o.y0));
-    const indices=[]; for(const o of opts){ const i=bank.findIndex(d=>d.name===o.name); if(i>=0) indices.push(i); }
-    if(indices.length>=2){
-      const tipW=tip.x1-tip.x0;
-      const region={ x0:Math.max(0,tip.x0-tipW*0.9), y0:Math.max(0,tip.y0-tipW*0.4),
-                    x1:Math.min(frame.width,tip.x1), y1:Math.min(frame.height,optTop) };
-      const best={index:-1,score:-2,x:0,y:0,w:0,h:0,s:1};
-      for(const i of indices){
-        const img=new Image(); img.src=bank[i].icon;
-        await new Promise(r=>{ img.onload=r; img.onerror=r; });
-        const iw=img.naturalWidth, ih=img.naturalHeight; if(!iw) continue;
-        for(const s of [1.5,2.0,2.5,3.0]){
-          const m=matchTemplate(frame,img,iw,ih,false,0.5,3,0.5,s,region);
-          if(m && m.score>best.score){ best.index=i; best.score=m.score; best.x=m.x; best.y=m.y; best.s=s; best.w=Math.round(iw*s); best.h=Math.round(ih*s); }
-        }
-      }
-      if(best.index>=0 && best.score>0.5){
-        const pad2=1.15;
-        state.regions.icon={ x:clamp((best.x-best.w*(pad2-1)/2)/frame.width,0,1), y:clamp((best.y-best.h*(pad2-1)/2)/frame.height,0,1),
-                            w:Math.min(1,best.w*pad2/frame.width), h:Math.min(1,best.h*pad2/frame.height) };
-      }
-    }
+    // 4. 图标框：用「提示文字左侧」固定布局定位（大图标在提示文字左侧、同一水平线）。
+    //    关键发现（39/42.png 实测）：大图标不在提示文字正下方，而在其左侧同一水平线；
+    //    且大图标（游戏渲染）与原始 PNG 模板的 matchTemplate 分数仅约 0.4，候选匹配定位不可靠
+    //    （会误匹配到游戏技能栏的同名图标、把框拖偏）。固定布局关系更稳定。
+    const tipW=tip.x1-tip.x0, tipH=tip.y1-tip.y0;
+    const side=Math.max(tipH*2.5, 40);      // 图标边长≈提示文字高度的 2.5 倍（39/42.png 实测）
+    const iconCx=tip.x0 - tipW*0.3;          // 大图标中心在提示文字左边界左侧 0.3 倍提示宽处
+    const iconCy=(tip.y0+tip.y1)/2 + tipH*0.8; // 大图标中心略低于提示文字中心（实测约低 0.8 倍提示高）
+    const x0=iconCx - side/2, y0=iconCy - side/2;
+    state.regions.icon={ x:clamp(x0/frame.width,0,1), y:clamp(y0/frame.height,0,1),
+                        w:Math.min(1, side/frame.width), h:Math.min(1, side/frame.height) };
     saveRegions();
     state.iconHash=null; state.lastIconHash='';
     $('ocr-status').textContent='定位完成，正在识别…';
@@ -834,7 +834,7 @@ async function recognize(manual){
   finally{ state.recognizing=false; }
 }
 function showResult(match,crop){ const rc=$('result-icon'),rg=rc.getContext('2d'); rg.clearRect(0,0,56,56);
-  if(match.index>=0){ if(crop) rg.drawImage(crop,0,0,56,56); $('result-name').textContent=match.name; $('result-meta').textContent=match.category+' · '+match.color;
+  if(match.index>=0){ if(crop){ const cw=crop.width,ch=crop.height,sc=Math.min(56/cw,56/ch); rg.drawImage(crop,(56-cw*sc)/2,(56-ch*sc)/2,cw*sc,ch*sc); } $('result-name').textContent=match.name; $('result-meta').textContent=match.category+' · '+match.color;
     const sc=(match.score+1)/2; $('score-fill').style.width=Math.round(sc*100)+'%'; $('score-text').textContent=(sc*100).toFixed(1)+'%'; }
   else{ $('result-name').textContent='未匹配'; $('result-meta').textContent='请调整图标区域'; $('score-fill').style.width='0%'; $('score-text').textContent='—'; } }
 function renderOptions(details,correctName,hitIndex){ const list=$('opt-list'); list.innerHTML='';
