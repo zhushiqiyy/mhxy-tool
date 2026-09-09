@@ -611,6 +611,56 @@ async function slideMatch(crop, iconDataUrl){
   }
   return best;
 }
+/* 深色增强滑窗匹配：把 crop 和模板都转成「深色灰度 = max(0, 128-lum)」（越暗的像素值越大、亮色归零），
+   只比较深色元素/线条的形状空间分布。模板用 alpha mask 排除透明背景（透明黑 RGB 0,0,0 经 128-lum 会变成 128，
+   被误判成「最强深色信号」）。用于区分「宁心/鹰击/佛法无边」这类游戏渲染后主体颜色几乎相同、但深色线条不同的暗绿技能。 */
+async function slideMatchDark(crop, iconDataUrl){
+  const img=await loadIconImage(iconDataUrl);
+  const iw=img?img.naturalWidth:0, ih=img?img.naturalHeight:0;
+  if(!iw||!ih) return -2;
+  const cw=crop.width, ch=crop.height;
+  if(cw<8||ch<8) return -2;
+  const cdata=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,cw,ch).data;
+  // crop 深色灰度（单通道）
+  const cgray=new Float32Array(cw*ch);
+  for(let i=0;i<cw*ch;i++){
+    const lum=0.299*cdata[i*4]+0.587*cdata[i*4+1]+0.114*cdata[i*4+2];
+    cgray[i]=Math.max(0, 128-lum);
+  }
+  let best=-2;
+  const scales=[0.75,0.9,1.05,1.2,1.4,1.6,1.8];
+  for(const s of scales){
+    const tw=Math.max(4,Math.round(iw*s)), th=Math.max(4,Math.round(ih*s));
+    if(tw>cw || th>ch) continue;
+    const tc=document.createElement('canvas'); tc.width=tw; tc.height=th;
+    const tg=tc.getContext('2d'); tg.drawImage(img,0,0,tw,th);
+    const td=tg.getImageData(0,0,tw,th).data;
+    const N=tw*th;
+    const tmask=new Uint8Array(N); const tval=new Float32Array(N);
+    let mn=0;
+    for(let i=0;i<N;i++){
+      if(td[i*4+3]>40){
+        const lum=0.299*td[i*4]+0.587*td[i*4+1]+0.114*td[i*4+2];
+        tval[i]=Math.max(0, 128-lum);
+        tmask[i]=1; mn++;
+      }
+    }
+    if(mn<20) continue;
+    let tm=0; for(let i=0;i<N;i++){ if(tmask[i]) tm+=tval[i]; } tm/=mn;
+    const tv=new Float32Array(N); let tn=0;
+    for(let i=0;i<N;i++){ if(tmask[i]){ const v=tval[i]-tm; tv[i]=v; tn+=v*v; } }
+    tn=Math.sqrt(tn);
+    const step=2;
+    for(let y=0;y+th<=ch;y+=step){ for(let x=0;x+tw<=cw;x+=step){
+      let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]) sm+=cgray[(y+j)*cw+(x+i)]; } sm/=mn;
+      let cov=0,sn=0;
+      for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]){ const sv=cgray[(y+j)*cw+(x+i)]-sm; cov+=sv*tv[j*tw+i]; sn+=sv*sv; } }
+      const sc=(sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):0;
+      if(sc>best) best=sc;
+    }}
+  }
+  return best;
+}
 /* 计算 crop 内「前景的深色占比」：与模板 darkFill 同口径（前景=非背景非蓝框，深色=lum<80）。
    用于区分蓝色剧情技能的深色形状差异（变化之术深色方形占比高、仙灵店铺左上角浅蓝占比低）。 */
 function darkFillOfCrop(crop){
@@ -675,6 +725,20 @@ async function matchIcon(crop, indices){
   // 置信度下限：分数过低说明框没对准图标（背景/乱码），判定「未匹配」，不输出结果
   const MIN_SCORE = 0.20;
   if(bestIdx<0 || bestScore<MIN_SCORE) return {index:-1,name:'',category:'',color:'',score:bestScore,secondScore};
+  // 易混暗绿技能组二次匹配：宁心/鹰击/佛法无边 游戏渲染后主体颜色几乎相同（都是暗绿），
+  // normal RGB NCC 区分度不足（84.png 佛法无边 normal 0.461 排第三、误判宁心 0.471）。
+  // 但三者「深色线条形状」不同，深色增强匹配能稳定区分（实测佛法无边 0.461 vs 宁心 0.378/鹰击 0.373）。
+  // 仅当 top1 属于该组时才触发（确定性决策、跨帧稳定、不跳转），且只对组内候选做深色增强（最多 3 个，快）。
+  const DARK_AMBIGUOUS = new Set(['宁心','鹰击','佛法无边']);
+  if(DARK_AMBIGUOUS.has(bank[bestIdx].name)){
+    let dBest=-1, dScore=-2;
+    for(const i of list){
+      if(!DARK_AMBIGUOUS.has(bank[i].name)) continue;
+      const dk = await slideMatchDark(work, bank[i].icon);
+      if(dk>dScore){ dScore=dk; dBest=i; }
+    }
+    if(dBest>=0){ bestIdx=dBest; bestScore=dScore; }
+  }
   return {index:bestIdx,name:bank[bestIdx].name,category:bank[bestIdx].category,color:bank[bestIdx].color,score:bestScore,secondScore};
 }
 /* 计算 crop 的 HSV 色相直方图（16 bins，只用有颜色像素），与模板预计算的 hueHist 做相关 */
