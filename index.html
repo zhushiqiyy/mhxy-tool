@@ -314,8 +314,11 @@ function loadIconAsData(src,size){
       g.drawImage(img,(size-dw)/2,(size-dh)/2,dw,dh);
       const id=g.getImageData(0,0,size,size); const px=id.data;
       const mask=new Uint8Array(size*size); const hist=new Float64Array(24); const hueHist=new Float64Array(16);
-      let n=0,sr=0,sg=0,sb=0;
+      let n=0,sr=0,sg=0,sb=0,darkCnt=0;
       for(let p=0;p<size*size;p++){ if(px[p*4+3]>40){ mask[p]=1;n++;sr+=px[p*4];sg+=px[p*4+1];sb+=px[p*4+2];
+        // 深色占比（lum<80 的前景像素占比）——区分蓝色剧情技能的深色形状差异。
+        // 实测：变化之术 0.648（深色围成方形、填得满）vs 仙灵店铺 0.568（左上角浅蓝区多、深色少）。
+        if(0.299*px[p*4]+0.587*px[p*4+1]+0.114*px[p*4+2] < 80) darkCnt++;
         hist[Math.min(7,px[p*4]>>5)]++; hist[8+Math.min(7,px[p*4+1]>>5)]++; hist[16+Math.min(7,px[p*4+2]>>5)]++;
         // HSV 色相直方图（16 bins），只统计有颜色（饱和度>0.12）的像素。
         // 游戏渲染会把暗色图标提亮，但色相（hue）基本保留，因此色相直方图比 RGB 直方图更鲁棒。
@@ -329,10 +332,10 @@ function loadIconAsData(src,size){
           else h=(r-gg)/(mx-mn)+4;
           h=h/6; if(h<0)h+=1;
           hueHist[Math.min(15,Math.floor(h*16))]++; } } }
-      resolve({data:px,mask,n,mean:[n?sr/n:0,n?sg/n:0,n?sb/n:0],hist,hueHist});
+      resolve({data:px,mask,n,mean:[n?sr/n:0,n?sg/n:0,n?sb/n:0],hist,hueHist,darkFill:n>0?darkCnt/n:0});
     };
     img.onerror=()=>{ const c=document.createElement('canvas'); c.width=size;c.height=size; const g=c.getContext('2d'); g.clearRect(0,0,size,size);
-      const id=g.getImageData(0,0,size,size); resolve({data:id,mask:new Uint8Array(size*size),n:0,mean:[0,0,0],hist:new Float64Array(24),hueHist:new Float64Array(16)}); };
+      const id=g.getImageData(0,0,size,size); resolve({data:id,mask:new Uint8Array(size*size),n:0,mean:[0,0,0],hist:new Float64Array(24),hueHist:new Float64Array(16),darkFill:0}); };
     img.src=src;
   });
 }
@@ -647,6 +650,28 @@ async function slideMatchDark(crop, iconDataUrl){
   }
   return best;
 }
+/* 计算 crop 内「前景的深色占比」：与模板 darkFill 同口径（前景=非背景非蓝框，深色=lum<80）。
+   用于区分蓝色剧情技能的深色形状差异（变化之术深色方形占比高、仙灵店铺左上角浅蓝占比低）。 */
+function darkFillOfCrop(crop){
+  const w=crop.width, h=crop.height;
+  if(w<8||h<8) return 0;
+  const d=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,w,h).data;
+  const corners=[0, (w-1)*4, (h-1)*w*4, ((h-1)*w+w-1)*4];
+  let br=0,bg=0,bb=0;
+  for(const c of corners){ br+=d[c]; bg+=d[c+1]; bb+=d[c+2]; }
+  br/=4; bg/=4; bb/=4;
+  let fg=0, dark=0;
+  for(let i=0;i<w*h;i++){
+    const r=d[i*4], g=d[i*4+1], b=d[i*4+2];
+    const diff=Math.abs(r-br)+Math.abs(g-bg)+Math.abs(b-bb);
+    const isBlue=(b>100 && b>r*1.35 && b>g*1.15); // 工具蓝框，排除
+    if(diff>28 && !isBlue){
+      fg++;
+      if(0.299*r+0.587*g+0.114*b < 80) dark++;
+    }
+  }
+  return fg>20 ? dark/fg : 0;
+}
 async function matchIcon(crop, indices){
   // 小图标先放大到 96px（整个屏幕共享时大图标仅 40-56px，放大给匹配更多像素、提升区分度与稳定性）
   let work=crop;
@@ -672,13 +697,17 @@ async function matchIcon(crop, indices){
   // 它们深色元素不同，当 top1 是剧情技能、且与次高候选差距小（<0.06，区分度不足）时，
   // 用「深色增强」重新匹配（只比较深色形状，亮色主体压平），综合 normal 与 dark 分数。
   if(bank[bestIdx].category==='剧情技能' && (bestScore-secondScore)<0.06){
-    // 只对剧情技能候选做深色增强匹配（这些蓝色图标之间才需要深色区分）
+    // 深色形状特征：变化之术深色围成方形（占比高）、仙灵店铺左上角浅蓝多（占比低），
+    // 深色占比是区分蓝色剧情技能的最可靠特征（实测 0.648 vs 0.568，差 14%）。
+    const cropFill = darkFillOfCrop(work);
     let bestIdx2=-1, bestScore2=-2;
     for(const i of list){
       if(bank[i].category!=='剧情技能') continue;
       const n = normScores.get(i)!=null ? normScores.get(i) : -2;
       const dk = await slideMatchDark(work, bank[i].icon);
-      const fin = 0.65*n + 0.35*dk; // normal 主导、深色增强辅助
+      const tplFill = state.templates[i].darkFill || 0;
+      const fillMatch = 1 - Math.min(1, Math.abs(cropFill - tplFill)/0.15); // 深色占比越接近越像
+      const fin = 0.45*n + 0.30*dk + 0.25*fillMatch; // normal 主导 + 深色增强 + 深色形状
       if(fin>bestScore2){ bestScore2=fin; bestIdx2=i; }
     }
     if(bestIdx2>=0){ bestIdx=bestIdx2; bestScore=bestScore2; }
