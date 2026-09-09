@@ -255,6 +255,7 @@ const state = {
     _lastCoordKey:'',     // 上次录入坐标的 key（格子+地名+坐标），用于坐标锁定（同一坐标不重复 OCR）
     _coordVote:null,      // 坐标防抖投票 {key,count}：连续 2 次读到相同坐标才录入
     _refineTick:0,        // refineIcons 降频计数（每 2 轮做一次全分辨率精修）
+    _hasMapVote:null,     // 宝图数量时间平滑投票 {key,count}：连续 2 轮检测一致才更新 hasMap
     ready:false,          // 藏宝图资源（宝图图标等）是否加载完成；未完成前 baotuLoop 不运行
   }
 };
@@ -669,7 +670,9 @@ function preprocessGreen(crop){
   for(let i=0;i<w*h;i++){
     const r=px[i*4], gg=px[i*4+1], b=px[i*4+2];
     const intensity = gg - Math.max(r,b); // 绿色强度
-    const v = intensity>15 ? 0 : 255;      // 绿色文字=黑，其他=白（阈值15保留暗绿边缘笔画）
+    // 坐标数字深绿≈92-123、地名浅绿≈39-76，tooltip 背景暗青灰是负值、灰绿阴影≈0。
+    // 阈值 30 同时保留浅绿地名和深绿数字（旧阈值 40 会漏掉浅绿地名边缘笔画，导致地名 OCR 失败）。
+    const v = intensity>30 ? 0 : 255;
     px[i*4]=v; px[i*4+1]=v; px[i*4+2]=v; px[i*4+3]=255;
   }
   g.putImageData(id,0,0);
@@ -1053,17 +1056,17 @@ function bestGap(vals, minGap, maxGap){
 }
 /* ===================== 藏宝图：检测宝图 + 光标 + 坐标 ===================== */
 function detectMaps(frame){
-  // 用精修后的图标位置映射到 4×5 格子（比逐格 NCC 更稳）
-  const g=state.bt.grid; if(!g) return 0;
-  state.bt.hasMap.fill(false);
+  // 用精修后的图标位置映射到 4×5 格子（比逐格 NCC 更稳）。返回新 hasMap 数组（不直接改 state，供时间平滑）。
+  const g=state.bt.grid; if(!g) return null;
+  const hasMap=new Array(20).fill(false);
   const cw=g.w/5, ch=g.h/4, iw2=state.bt.iconWActual/2, ih2=state.bt.iconHActual/2; let cnt=0;
   for(const p of state.bt.iconPositions){
     const cx=p.x+iw2, cy=p.y+ih2; // 图标中心
     const c=Math.floor((cx-g.x)/cw), r=Math.floor((cy-g.y)/ch);
     if(r<0||r>3||c<0||c>4) continue;
-    const idx=r*5+c; if(!state.bt.hasMap[idx]){ state.bt.hasMap[idx]=true; cnt++; }
+    const idx=r*5+c; if(!hasMap[idx]){ hasMap[idx]=true; cnt++; }
   }
-  return cnt;
+  return {hasMap, cnt};
 }
 function matchTemplate(frame, tplImg, tplW, tplH, useMask, scale, step, minScore, tplScale, region){
   tplScale = tplScale || 1;
@@ -1100,45 +1103,6 @@ function matchTemplate(frame, tplImg, tplW, tplH, useMask, scale, step, minScore
   }}
   if(bestSc<minScore) return null;
   return {x:Math.round(bestX/scale), y:Math.round(bestY/scale), score:bestSc};
-}
-/* 检测背包格子的「金橙色高亮描边」——用户点击/选中某格时游戏给该格边框加金橙色高亮（比 tooltip 文字检测可靠得多）。
-   返回金橙色像素的中心 {cx,cy}，未检测到返回 null。
-   金橙色 RGB 约 (200-255, 130-200, 30-90)：R 高、G 中、B 低。
-   注意：只返回中心，格子映射由调用方用「最近的有宝图图标」确定（避免精确格子划分受网格 ±2px 误差影响）。 */
-function detectGoldHighlight(frame){
-  const g=state.bt.grid; if(!g) return null;
-  const x0=Math.max(0,Math.round(g.x-1)), y0=Math.max(0,Math.round(g.y-1));
-  const W=Math.min(frame.width,Math.round(g.x+g.w+1))-x0;
-  const H=Math.min(frame.height,Math.round(g.y+g.h+1))-y0;
-  if(W<20||H<15) return null;
-  const d=frame.getContext('2d',{willReadFrequently:true}).getImageData(x0,y0,W,H).data;
-  let sumX=0, sumY=0, cnt=0;
-  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-    const i=(y*W+x)*4; const r=d[i],gg=d[i+1],b=d[i+2];
-    if(r>160 && gg>90 && gg<210 && b<110 && r>gg*1.2 && gg>b*1.3){
-      sumX+=x0+x; sumY+=y0+y; cnt++;
-    }
-  }
-  if(cnt<40 || cnt>400) return null;  // 单格描边约 100-200 像素；<40 无高亮，>400 是「整个背包金橙色背景」（刚打开背包）
-  return {cx:sumX/cnt, cy:sumY/cnt};
-}
-/* 金橙色中心 → 最近的有宝图图标所在格子（用户点击的是宝图，金橙色描边在选中格子上） */
-function goldToCell(gold){
-  const g=state.bt.grid; if(!g||!gold) return -1;
-  let bestIdx=-1, bestD=Infinity;
-  for(let i=0;i<state.bt.iconPositions.length;i++){
-    const p=state.bt.iconPositions[i];
-    const pcx=p.x+state.bt.iconWActual/2, pcy=p.y+state.bt.iconHActual/2;
-    const dd=Math.hypot(pcx-gold.cx, pcy-gold.cy);
-    if(dd<bestD){ bestD=dd; bestIdx=i; }
-  }
-  if(bestIdx<0) return -1;
-  const p=state.bt.iconPositions[bestIdx];
-  const cw=g.w/5, ch=g.h/4;
-  const c=Math.floor((p.x + state.bt.iconWActual/2 - g.x)/cw);
-  const r=Math.floor((p.y + state.bt.iconHActual/2 - g.y)/ch);
-  if(r<0||r>3||c<0||c>4) return -1;
-  return r*5+c;
 }
 function parseCoord(text){
   const t=(text||'').replace(/[\s\u3000·•\-—_—]/g,'');
@@ -1229,45 +1193,89 @@ async function readFromRegion(frame, x0, y0, w, h){
   const crop=document.createElement('canvas'); crop.width=w; crop.height=h;
   const cg=crop.getContext('2d',{willReadFrequently:true}); cg.drawImage(frame,x0,y0,w,h,0,0,w,h);
   const d=cg.getImageData(0,0,w,h).data;
-  // 检测绿色像素：用「绿色强度 G-max(R,B)>15」保留暗绿边缘（坐标是纯绿到暗绿渐变，硬阈值 g>r*1.25 会丢边缘笔画）。
-  // 排除：灰绿阴影(g≈b，intensity≈0)、淡蓝(b主导，intensity<0)。
-  let minX=w, minY=h, maxX=0, maxY=0, cnt=0;
+  // 检测绿色坐标文字：绿色强度 G-max(R,B)>30（坐标数字深绿≈92-123、地名浅绿≈39-76，背景暗青灰是负值、灰绿阴影≈0）。
+  // 用「y 投影连续段」分行（而非聚类容差）：坐标行和 tooltip 描述文字之间有空行间隔，
+  // 聚类容差 12px 会把间隔 >12px 的两行连成一行导致 OCR 混入描述文字读乱码。
+  const rowCnt=new Int32Array(h);
   for(let i=0;i<w*h;i++){
     const r=d[i*4], g=d[i*4+1], b=d[i*4+2];
-    if(g>40 && (g-Math.max(r,b))>15){
-      const x=i%w, y=(i/w)|0;
-      if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y; cnt++;
+    if(g>40 && (g-Math.max(r,b))>30){ rowCnt[(i/w)|0]++; }
+  }
+  // 找连续段（该行绿色像素 >3 视为文字行）
+  const segs=[];
+  let inSeg=false, segStart=0;
+  for(let y=0;y<h;y++){
+    const has=rowCnt[y]>3;
+    if(has && !inSeg){ segStart=y; inSeg=true; }
+    else if(!has && inSeg){ segs.push({y0:segStart, y1:y-1}); inSeg=false; }
+  }
+  if(inSeg) segs.push({y0:segStart, y1:h-1});
+  if(!segs.length) return null;
+  // 逐段 OCR + parseCoord（地名字典严格匹配，排除描述文字/游戏 UI 其他绿色）
+  for(const seg of segs){
+    if(seg.y1-seg.y0 < 6) continue;
+    // 该段的 x 范围和像素数
+    let minX=w, maxX=0, cnt=0;
+    for(let y=seg.y0;y<=seg.y1;y++)for(let x=0;x<w;x++){
+      const i=(y*w+x)*4; const r=d[i*4], g=d[i*4+1], b=d[i*4+2];
+      if(g>40 && (g-Math.max(r,b))>30){ if(x<minX)minX=x; if(x>maxX)maxX=x; cnt++; }
+    }
+    if(cnt<15 || (maxX-minX)<20) continue;
+    const pad=6;
+    const bx=Math.max(0,minX-pad), by=Math.max(0,seg.y0-pad);
+    const bw=Math.min(w-bx, maxX-minX+1+pad*2), bh=Math.min(h-by, seg.y1-seg.y0+1+pad*2);
+    if(bw<15||bh<8) continue;
+    const c2=document.createElement('canvas'); c2.width=bw; c2.height=bh;
+    c2.getContext('2d').drawImage(crop,bx,by,bw,bh,0,0,bw,bh);
+    const text=await ocrOne(preprocessGreen(c2));
+    if(!text) continue;
+    const coord=parseCoord(text);
+    // 接受：地名+坐标（正常）；或地名空但坐标数字读出（地名浅绿小字 OCR 可能读不出，但坐标数字深绿能读出）
+    if(coord && (coord.x!==undefined || coord.y!==undefined) && (coord.x>0 || coord.y>0)){
+      return {coord, minX:x0+minX, minY:y0+seg.y0, cx:x0+(minX+maxX)/2, cy:y0+(seg.y0+seg.y1)/2};
     }
   }
-  if(cnt<10) return null;
-  // 整体 bbox（绿色坐标文字通常是「地名(x,y)」一行，整体裁剪一次 OCR，避免逐行多次调用 Tesseract 拖慢主线程）
-  const pad=6;
-  const bx=Math.max(0,minX-pad), by=Math.max(0,minY-pad);
-  const bw=Math.min(w-bx, maxX-minX+1+pad*2), bh=Math.min(h-by, maxY-minY+1+pad*2);
-  if(bw<12||bh<8) return null;
-  const c2=document.createElement('canvas'); c2.width=bw; c2.height=bh;
-  c2.getContext('2d').drawImage(crop,bx,by,bw,bh,0,0,bw,bh);
-  const text=await ocrOne(preprocessGreen(c2));
-  if(!text) return null;
-  const coord=parseCoord(text);
-  if(coord && coord.name){ return {coord, cx:x0+(minX+maxX)/2, cy:y0+(minY+maxY)/2}; }
   return null;
 }
-/* 读「选中格子下方紧邻区域」的 tooltip 绿色坐标文字（金橙色高亮格子 = 当前点击的宝图）。
-   tooltip 出现在被点击宝图下方，坐标行（绿色）在 tooltip 内。
-   只读该格下方紧邻范围（不读全网格下方），精确避开其他格子 tooltip 和游戏场景绿色文字。 */
-async function readCoordinate(frame, goldCell){
+/* 读「背包网格下方」的 tooltip 绿色坐标文字。tooltip（藏宝图信息框）出现在被悬停宝图下方，
+   坐标行（亮绿色「地名(x,y)」）在 tooltip 内。不依赖金黄色高亮检测（实测悬停高亮是白色 RGB 255,254,245，
+   旧 detectGoldHighlight 找金黄色永远检测不到，导致坐标读取链路根本不启动）。 */
+async function readCoordinate(frame){
   const g=state.bt.grid;
   if(!g) return null;
-  const cw=g.w/5, ch=g.h/4;
-  const cellX = g.x + (goldCell%5)*cw;
-  const cellY = g.y + Math.floor(goldCell/5)*ch;
-  // tooltip 出现在被点击格子的右下方，宽约 3-4 列、高约 3-4 行，读取范围覆盖完整 tooltip（含绿色坐标行）
-  const x0=Math.max(0, Math.round(cellX - cw*0.5));
-  const y0=Math.max(0, Math.round(cellY + ch*0.2));   // 格子下缘
-  const w=Math.min(frame.width-x0, Math.round(cw*4.5));
-  const h=Math.min(frame.height-y0, Math.round(ch*4));
+  // tooltip 出现在网格下方/右下方，坐标行（亮绿「地名(x,y)」）在 tooltip 内。
+  // y0 从网格底部附近开始（避开网格内的宝图图标——图标是绿色系，会被绿色检测误当坐标）。
+  const x0=Math.max(0, Math.round(g.x - g.w*0.5));
+  const y0=Math.max(0, Math.round(g.y + g.h*0.85));
+  const w=Math.min(frame.width-x0, Math.round(g.w*2.2));
+  const h=Math.min(frame.height-y0, Math.round(g.h*2.0));
   return await readFromRegion(frame, x0, y0, w, h);
+}
+/* 坐标行 bbox 左上角 (minX,minY) → 反推被悬停宝图格子：tooltip 出现在被悬停格子右下方。
+   两阶段映射：①minX 定列（坐标行左边缘最接近的格子列）；②minY 定行（该列中有宝图、且在坐标行上方、y 最大的格子）。
+   实测图021/图022：minX→第1列、minY→第3行，正确映射到第3行第1列。 */
+function coordToCell(minX, minY){
+  const g=state.bt.grid; if(!g) return -1;
+  const cw=g.w/5, ch=g.h/4;
+  // ① 列：坐标行左边缘 minX 最接近的格子列
+  let col=-1, bestD=Infinity;
+  for(let c=0;c<5;c++){
+    const colCx=g.x + c*cw + cw/2;
+    const d=Math.abs(colCx - minX);
+    if(d<bestD){ bestD=d; col=c; }
+  }
+  // ② 行：该列中有宝图、在坐标行上方（pcy<minY）、y 最大的格子
+  let row=-1, bestY=-Infinity;
+  for(let i=0;i<state.bt.iconPositions.length;i++){
+    const p=state.bt.iconPositions[i];
+    const pcx=p.x + state.bt.iconWActual/2, pcy=p.y + state.bt.iconHActual/2;
+    const c=Math.floor((pcx-g.x)/cw);
+    if(c!==col) continue;
+    if(pcy>=minY) continue;
+    if(pcy>bestY){ bestY=pcy; row=Math.floor((pcy-g.y)/ch); }
+  }
+  if(col<0||row<0||row>3||col>4) return -1;
+  return row*5+col;
 }
 
 /* ===================== 藏宝图：渲染 + 排序 ===================== */
@@ -1327,26 +1335,46 @@ async function baotuLoop(){
       return;
     }
     if(!state.bt.grid){ $('bt-status').textContent='未定位到背包格子（视频 '+frame.width+'x'+frame.height+'）'; return; }
-    // 3. 检测宝图（图标落点映射到 4×5 格子）
-    const cnt=detectMaps(frame);
-    // 4. 金橙色高亮驱动坐标提取：检测用户点击/选中的格子（金橙色描边是游戏 UI 的可靠反馈，比 tooltip 文字检测稳定），
-    //    选中格子有宝图且未读坐标时才读 tooltip 坐标，读完全部停止（不再反复 OCR 卡顿）
-    const gold = detectGoldHighlight(frame);
-    const goldCell = gold ? goldToCell(gold) : -1;
-    state.bt.cursorCell = goldCell;
-    if(goldCell>=0 && state.bt.hasMap[goldCell] && !state.bt.coords[goldCell] && !state.bt.reading){
+    // 3. 检测宝图（hasMap 时间平滑：连续 2 轮检测一致才更新，消除图标检测波动/边缘图标分数抖动导致的「宝图数量不停跳」）
+    const det=detectMaps(frame);
+    let cnt=0;
+    if(det){
+      const key=det.hasMap.map(v=>v?1:0).join('');
+      if(state.bt._hasMapVote && state.bt._hasMapVote.key===key){
+        if(++state.bt._hasMapVote.count>=2){
+          state.bt.hasMap=det.hasMap; renderBtGrid();
+        }
+      }else{
+        state.bt._hasMapVote={key, count:1};
+      }
+      cnt=state.bt.hasMap.filter(Boolean).length;
+    }
+    // 4. 坐标读取：检测网格下方绿色坐标文字（tooltip 的坐标行），降频（每 2 轮 ~3s）+ 仍有宝图未读坐标才读。
+    //    不再依赖金黄色高亮——实测悬停高亮是白色 RGB(255,254,245)，旧 detectGoldHighlight 找金黄色永远检测不到，
+    //    导致坐标读取链路根本不启动（这是「坐标从头到尾读不出来」的直接根因）。
+    let cr=null;
+    const unreadMap = state.bt.hasMap.some((h,i)=> h && !state.bt.coords[i]);
+    if(unreadMap && state.bt.loopCount%2===1 && !state.bt.reading){
       state.bt.reading=true;
-      const cr = await readCoordinate(frame, goldCell);
+      cr=await readCoordinate(frame);
       state.bt.reading=false;
-      if(cr && cr.coord && cr.coord.name){
-        state.bt.coords[goldCell]=cr.coord; renderBtGrid(); buildSorted();
+    }
+    // 5. 坐标映射：tooltip 在被悬停格子右下方，被悬停格子 = 坐标行 bbox 左上角上方、x 最接近的宝图格子
+    let cell=-1;
+    if(cr && cr.coord && (cr.coord.name || cr.coord.x>0 || cr.coord.y>0)){
+      cell=coordToCell(cr.minX, cr.minY);
+      if(cell>=0 && state.bt.hasMap[cell]){
+        const ex=state.bt.coords[cell];
+        if(!ex || ex.x!==cr.coord.x || ex.y!==cr.coord.y || ex.name!==cr.coord.name){
+          state.bt.coords[cell]=cr.coord; renderBtGrid(); buildSorted();
+        }
       }
     }
+    state.bt.cursorCell=cell;
     // 状态
     const readCnt=state.bt.coords.filter(Boolean).length;
-    const tipTxt = goldCell>=0
-      ? ('选中第 '+(Math.floor(goldCell/5)+1)+' 行 '+(goldCell%5+1)+' 列'+(state.bt.coords[goldCell]?('：'+state.bt.coords[goldCell].name+'('+state.bt.coords[goldCell].x+','+state.bt.coords[goldCell].y+')'):'（读取坐标中…）'))
-      : '点击宝图格子以读取坐标';
+    const coordTxt = (cr&&cr.coord&&(cr.coord.x>0||cr.coord.y>0)) ? (cr.coord.name?cr.coord.name:'')+'('+cr.coord.x+','+cr.coord.y+')' : '';
+    const tipTxt = coordTxt ? ('读取到坐标 '+coordTxt+(cell>=0?('，映射第 '+(Math.floor(cell/5)+1)+' 行 '+(cell%5+1)+' 列'):'')) : (cell>=0?('悬停第 '+(Math.floor(cell/5)+1)+' 行 '+(cell%5+1)+' 列'):'鼠标移到宝图格子以读取坐标');
     const dpiTxt = state.dprScale && state.dprScale!==1 ? ('显示缩放 '+Math.round(state.dprScale*100)+'%') : '';
     $('bt-status').textContent='已识别宝图 '+cnt+' 张，已录入坐标 '+readCnt+' 个；'+tipTxt+(dpiTxt?('；'+dpiTxt):'');
   }catch(e){ /* 忽略单次错误 */ }
