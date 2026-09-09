@@ -823,6 +823,36 @@ async function ocrFullWithLines(frame){
     }));
   }catch(e){ return []; }
 }
+/* 彩色平滑放大：OCR 前把裁剪图放大 factor 倍（坐标文字小，每字需 ≥60px 才易被 OCR 识别）。
+   与 preprocessGreen（绿色二值化）不同，这里保留原彩色。
+   关键：tooltip 里标题/描述是白色、坐标是绿色，彩色保留完整文字上下文，
+   实测彩色放大 4 倍 OCR 能稳定读出「狮驼岭（13,82）」，而绿色二值化读不出（图028/029 坐标0个的根因）。 */
+function scaleUpColor(crop, factor){
+  const c=document.createElement('canvas');
+  c.width=Math.round(crop.width*factor); c.height=Math.round(crop.height*factor);
+  const g=c.getContext('2d'); g.imageSmoothingEnabled=true;
+  g.drawImage(crop,0,0,c.width,c.height);
+  return c;
+}
+/* 区域带位置 OCR：裁剪 (x0,y0,w,h) 区域，彩色放大 factor 倍，返回带位置的行 [{text,x0,y0,x1,y1}]（视频像素坐标）。
+   用于坐标提取：拿到「地名(x,y)」行的真实 bbox 位置，精确映射到背包格子。
+   （绿色检测只能粗定位 tooltip 区域，不能精确定位坐标行——说明文字也是绿色会把段拉宽，需靠 OCR 的 bbox 定位坐标行） */
+async function ocrRegionWithLines(frame, x0, y0, w, h, factor){
+  if(!state.ocrReady||!state.ocrWorker) return [];
+  const crop=document.createElement('canvas'); crop.width=w; crop.height=h;
+  crop.getContext('2d',{willReadFrequently:true}).drawImage(frame,x0,y0,w,h,0,0,w,h);
+  const big=scaleUpColor(crop, factor||4);
+  try{
+    const r=await state.ocrWorker.recognize(big);
+    const lines=(r.data&&r.data.lines)?r.data.lines:[];
+    const f=factor||4;
+    return lines.filter(l=>l.text&&l.text.trim()).map(l=>({
+      text:l.text.trim(),
+      x0:x0+l.bbox.x0/f, y0:y0+l.bbox.y0/f,
+      x1:x0+l.bbox.x1/f, y1:y0+l.bbox.y1/f,
+    }));
+  }catch(e){ return []; }
+}
 /* 绿色文字预处理：绿色强度（G - max(R,B)）二值化，保留暗绿边缘像素（严格 g>r 会丢掉渐变边缘导致笔画断裂/漏位） */
 function preprocessGreen(crop){
   const w=crop.width, h=crop.height;
@@ -1424,28 +1454,36 @@ async function readFromRegion(frame, x0, y0, w, h){
   }
   if(inSeg) segs.push({y0:segStart, y1:h-1});
   if(!segs.length) return null;
-  // 逐段 OCR + parseCoord（地名字典严格匹配，排除描述文字/游戏 UI 其他绿色）
+  // 逐段：绿色检测只用来「粗定位」tooltip 区域，OCR 用带位置版本精确定位坐标行。
+  // 关键（换逻辑，图028/029 坐标读不出的根因）：
+  //   ① 旧逻辑「绿色二值化 OCR」在低分辨率下噪声重、文字笔画污染，读不出坐标 → 改「彩色放大 4 倍 OCR」。
+  //   ② 旧逻辑用「绿色段左边缘」定列，但 tooltip 说明文字也是绿色会把段拉宽（实测拉到 884px），列映射错 → 改用 OCR 返回的坐标行真实 bbox 定位。
   for(const seg of segs){
     if(seg.y1-seg.y0 < 6) continue;
-    // 该段的 x 范围和像素数
+    // 该段的 x 范围和像素数（仅用于判断是否为有效文字段，不用于定位列）
     let minX=w, maxX=0, cnt=0;
     for(let y=seg.y0;y<=seg.y1;y++)for(let x=0;x<w;x++){
       const i=(y*w+x)*4; const r=d[i*4], g=d[i*4+1], b=d[i*4+2];
       if(g>40 && (g-Math.max(r,b))>30){ if(x<minX)minX=x; if(x>maxX)maxX=x; cnt++; }
     }
     if(cnt<15 || (maxX-minX)<20) continue;
-    const pad=6;
-    const bx=Math.max(0,minX-pad), by=Math.max(0,seg.y0-pad);
-    const bw=Math.min(w-bx, maxX-minX+1+pad*2), bh=Math.min(h-by, seg.y1-seg.y0+1+pad*2);
-    if(bw<15||bh<8) continue;
-    const c2=document.createElement('canvas'); c2.width=bw; c2.height=bh;
-    c2.getContext('2d').drawImage(crop,bx,by,bw,bh,0,0,bw,bh);
-    const text=await ocrOne(preprocessGreen(c2));
-    if(!text) continue;
-    const coord=parseCoord(text);
-    // 接受：地名+坐标（正常）；或地名空但坐标数字读出（地名浅绿小字 OCR 可能读不出，但坐标数字深绿能读出）
-    if(coord && (coord.x!==undefined || coord.y!==undefined) && (coord.x>0 || coord.y>0)){
-      return {coord, minX:x0+minX, minY:y0+seg.y0, cx:x0+(minX+maxX)/2, cy:y0+(seg.y0+seg.y1)/2};
+    // 段高上限 60px：坐标行+相邻说明文字合并约 63px，再高的（游戏 UI 大块绿色）跳过省 OCR
+    if((seg.y1-seg.y0)>60) continue;
+    // 向上扩展覆盖 tooltip 标题+描述（白字），向下覆盖坐标数字；x 左右扩展覆盖 tooltip 边框
+    const EX_UP=70, EX_DOWN=45, EX_X=40;
+    const bx=Math.max(0,minX-EX_X), by=Math.max(0,seg.y0-EX_UP);
+    const bw=Math.min(w-bx, maxX-minX+1+EX_X*2);
+    const bh=Math.min(h-by, seg.y1-seg.y0+1+EX_UP+EX_DOWN);
+    if(bw<15||bh<30) continue;
+    // 彩色放大 4 倍 + 带位置 OCR：从结果里找「地名(x,y)」格式的行，用其 bbox 精确定位坐标行
+    const lines=await ocrRegionWithLines(frame, x0+bx, y0+by, bw, bh, 4);
+    for(const ln of lines){
+      const coord=parseCoord(ln.text);
+      // 接受：地名+坐标（正常）；或地名空但坐标数字读出
+      if(coord && (coord.x!==undefined || coord.y!==undefined) && (coord.x>0 || coord.y>0)){
+        // minX/minY 用坐标行真实 bbox（OCR 精确定位），而非绿色段左边缘
+        return {coord, minX:ln.x0, minY:ln.y0, cx:(ln.x0+ln.x1)/2, cy:(ln.y0+ln.y1)/2};
+      }
     }
   }
   return null;
