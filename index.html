@@ -256,6 +256,7 @@ const state = {
     _coordVote:null,      // 坐标防抖投票 {key,count}：连续 2 次读到相同坐标才录入
     _refineTick:0,        // refineIcons 降频计数（每 2 轮做一次全分辨率精修）
     _hasMapVote:null,     // 宝图数量时间平滑投票 {key,count}：连续 2 轮检测一致才更新 hasMap
+    _gridHash:null,       // 网格区域帧哈希：画面不变（不操作）就跳过图标检测+网格外推，锁定识别结果（根治「宝图一直飘」）
     ready:false,          // 藏宝图资源（宝图图标等）是否加载完成；未完成前 baotuLoop 不运行
   }
 };
@@ -1364,12 +1365,15 @@ async function readFromRegion(frame, x0, y0, w, h){
 async function readCoordinate(frame){
   const g=state.bt.grid;
   if(!g) return null;
-  // tooltip 出现在网格下方/右下方，坐标行（亮绿「地名(x,y)」）在 tooltip 内。
-  // y0 从网格底部附近开始（避开网格内的宝图图标——图标是绿色系，会被绿色检测误当坐标）。
+  // tooltip（藏宝图信息框）出现在被悬停宝图的右下方，位置随悬停格子变化：
+  // 悬停第1行格子时 tooltip 会覆盖到网格中部，悬停第4行时在网格下方更远。
+  // 因此读取区域从「网格顶部」开始、覆盖网格 + 下方 2 倍高度，确保任何悬停位置的 tooltip 坐标行都在范围内。
+  // 误检的宝图图标（绿色系成块）由 readFromRegion 的「连续段分行 + parseCoord 地名字典严格匹配」过滤
+  // （图标 OCR 出来不是「地名(x,y)」格式，会被拒绝）。
   const x0=Math.max(0, Math.round(g.x - g.w*0.5));
-  const y0=Math.max(0, Math.round(g.y + g.h*0.85));
+  const y0=Math.max(0, Math.round(g.y));
   const w=Math.min(frame.width-x0, Math.round(g.w*2.2));
-  const h=Math.min(frame.height-y0, Math.round(g.h*2.0));
+  const h=Math.min(frame.height-y0, Math.round(g.h*3.0));
   return await readFromRegion(frame, x0, y0, w, h);
 }
 /* 坐标行 bbox 左上角 (minX,minY) → 反推被悬停宝图格子：tooltip 出现在被悬停格子右下方。
@@ -1446,36 +1450,51 @@ async function baotuLoop(){
       state.dprScale = curDpr;
     }
     state.bt._lastVW = frame.width;
-    // 1. 定位网格（首次 detectScale 定比例，之后 scale 锁定不再重扫；图标直接外推网格）
-    const g=autoLocateGrid(frame);
-    if(g && g.w>40 && g.h>40){ state.bt.grid=g; }
+    // 1. 帧哈希锁定：网格区域（上 60%，避开 tooltip 重叠的底部）画面不变 → 跳过图标检测和网格外推，
+    //    锁定识别结果，根治「背包没动、宝图数量却一直飘来飘去」。
+    //    tooltip 弹出在网格下方/底部，不影响上 60% 的哈希；移动背包/内容变化才会触发重新识别。
+    let hashSame = false;
+    if(state.bt.grid){
+      const g0=state.bt.grid;
+      const hsh=frameHash(frame, {x:g0.x/frame.width, y:g0.y/frame.height, w:g0.w/frame.width, h:g0.h*0.6/frame.height});
+      if(state.bt._gridHash!=null && hsh===state.bt._gridHash){ hashSame=true; }
+      state.bt._gridHash=hsh;
+    }
+    let g=state.bt.grid;
+    if(!hashSame || !g){
+      // 画面变化或首次：重新定位网格 + 检测宝图
+      g=autoLocateGrid(frame);
+      if(g && g.w>40 && g.h>40){ state.bt.grid=g; }
+    }
     // 2. 背包关闭检测：图标数骤降（<2）说明背包/道具行囊已关闭，清空网格和识别结果，避免识别框残留卡在旧位置
     if(state.bt.iconPositions.length < 2){
-      if(state.bt.grid){ state.bt.grid=null; state.bt.hasMap.fill(false); renderBtGrid(); }
+      if(state.bt.grid){ state.bt.grid=null; state.bt._gridHash=null; state.bt.hasMap.fill(false); renderBtGrid(); }
       $('bt-status').textContent='未检测到背包格子，请打开背包/道具行囊';
       return;
     }
     if(!state.bt.grid){ $('bt-status').textContent='未定位到背包格子（视频 '+frame.width+'x'+frame.height+'）'; return; }
-    // 3. 检测宝图（hasMap 时间平滑：连续 2 轮检测一致才更新，消除图标检测波动/边缘图标分数抖动导致的「宝图数量不停跳」）
-    const det=detectMaps(frame);
-    let cnt=0;
-    if(det){
-      const key=det.hasMap.map(v=>v?1:0).join('');
-      if(state.bt._hasMapVote && state.bt._hasMapVote.key===key){
-        if(++state.bt._hasMapVote.count>=2){
-          state.bt.hasMap=det.hasMap; renderBtGrid();
+    // 3. 检测宝图（仅画面变化时重检测；画面不变沿用上次结果，锁定不跳变）
+    let cnt=state.bt.hasMap.filter(Boolean).length;
+    if(!hashSame){
+      const det=detectMaps(frame);
+      if(det){
+        const key=det.hasMap.map(v=>v?1:0).join('');
+        if(state.bt._hasMapVote && state.bt._hasMapVote.key===key){
+          if(++state.bt._hasMapVote.count>=2){
+            state.bt.hasMap=det.hasMap; renderBtGrid();
+          }
+        }else{
+          state.bt._hasMapVote={key, count:1};
         }
-      }else{
-        state.bt._hasMapVote={key, count:1};
+        cnt=state.bt.hasMap.filter(Boolean).length;
       }
-      cnt=state.bt.hasMap.filter(Boolean).length;
     }
-    // 4. 坐标读取：检测网格下方绿色坐标文字（tooltip 的坐标行），降频（每 2 轮 ~3s）+ 仍有宝图未读坐标才读。
-    //    不再依赖金黄色高亮——实测悬停高亮是白色 RGB(255,254,245)，旧 detectGoldHighlight 找金黄色永远检测不到，
-    //    导致坐标读取链路根本不启动（这是「坐标从头到尾读不出来」的直接根因）。
+    // 4. 坐标读取：每轮检测网格区域的绿色坐标文字（tooltip 弹出是瞬时的，需及时响应）。
+    //    readFromRegion 只在检测到绿色才 OCR（无 tooltip 时绿色检测秒回，几乎零开销）。
+    //    不依赖金黄色高亮——实测悬停高亮是白色 RGB(255,254,245)，旧 detectGoldHighlight 找金黄色永远检测不到。
     let cr=null;
     const unreadMap = state.bt.hasMap.some((h,i)=> h && !state.bt.coords[i]);
-    if(unreadMap && state.bt.loopCount%2===1 && !state.bt.reading){
+    if(unreadMap && !state.bt.reading){
       state.bt.reading=true;
       cr=await readCoordinate(frame);
       state.bt.reading=false;
