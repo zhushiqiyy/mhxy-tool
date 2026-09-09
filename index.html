@@ -894,17 +894,17 @@ function autoLocateGrid(frame){
 function detectScale(frame){
   const baseW=state.bt.iconW, baseH=state.bt.iconH;
   // 档位覆盖真实场景：整个屏幕共享约 0.45、游戏窗口共享约 0.5-1.0、高分辨率放大到 1.5。
-  // 去掉 1.7/2.0/2.4/2.8/3.2 等极端档位（图标不会放大到 3 倍），减少首次全帧扫描的计算量（前期卡顿主因）。
-  const SCALES=[0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.15,1.3,1.5];
-  const SC0=0.5, d0=downsampleData(frame,SC0);
+  // 精简到 7 档（步长约 0.15），配合 step 6，把首次全帧扫描耗时从 ~5s 降到 ~1s（前期卡顿主因）。
+  const SCALES=[0.45,0.6,0.75,0.9,1.0,1.2,1.5];
+  const SC0=0.45, d0=downsampleData(frame,SC0);
   let bestScale=1, bestScore=-1;
   for(const s of SCALES){
     const tw=Math.max(3,Math.round(baseW*SC0*s)), th=Math.max(3,Math.round(baseH*SC0*s));
-    if(tw<7||th<7) continue;             // 模板太小易匹配噪声，跳过
+    if(tw<6||th<6) continue;             // 模板太小易匹配噪声，跳过
     if(tw+2>=d0.w||th+2>=d0.h) continue;
     const td=scaledIconData(tw,th);
-    // 阈值 0.5 + NMS 0.4，step 4（比 step 3 减少约 44% 扫描位置，加速首次定位）
-    const ms=scanTemplate(d0.data,d0.w,d0.h,td,tw,th,0.5,4);
+    // step 6：detectScale 只需选对档位（不需精确位置），粗扫即可；findIconsAtScale 再用 step 3 精扫
+    const ms=scanTemplate(d0.data,d0.w,d0.h,td,tw,th,0.5,6);
     const kept=nmsMatches(ms, baseW*0.4*SC0, baseH*0.4*SC0);
     // 用「匹配分数之和」而非「匹配数」选择 scale：真实尺度的分数总和显著更高（相邻档位分数低），
     // 避免相邻档位匹配数接近时误选。
@@ -937,51 +937,6 @@ function findIconsAtScale(frame, scale, region){
   // 而偶数轮保留，图标数在精修/非精修之间跳动（实测 6/9/7），正是「背包没动识别框却跳来跳去」的根因。
   // 粗检测（SC=0.5）±2px 误差对 47px 格子映射无影响（不跨边界），且省掉每轮全分辨率 getImageData（卡顿主因之一）。
   return {positions:coarse, iconW, iconH};
-}
-/* 全分辨率精修图标位置：对每个粗图标在 ±2px 内做 NCC 精搜，并过滤低分误检。region 内读取像素（大幅减少 getImageData 开销） */
-function refineIcons(frame, coarse, iconW, iconH, region){
-  if(!coarse.length) return coarse;
-  let ox=0, oy=0, W=frame.width, H=frame.height;
-  if(region && region.x1-region.x0>60 && region.y1-region.y0>60){
-    ox=Math.max(0,Math.round(region.x0)); oy=Math.max(0,Math.round(region.y0));
-    W=Math.min(frame.width, Math.round(region.x1))-ox;
-    H=Math.min(frame.height, Math.round(region.y1))-oy;
-    if(W<iconW||H<iconH){ ox=0; oy=0; W=frame.width; H=frame.height; }
-  }
-  const fdata=frame.getContext('2d',{willReadFrequently:true}).getImageData(ox,oy,W,H).data;
-  const tc=document.createElement('canvas'); tc.width=iconW; tc.height=iconH;
-  const tg=tc.getContext('2d',{willReadFrequently:true}); tg.drawImage(state.bt.iconImg,0,0,iconW,iconH);
-  const td=tg.getImageData(0,0,iconW,iconH).data;
-  const N=iconW*iconH;
-  let tm=0; for(let i=0;i<N;i++){ tm+=td[i*4]+td[i*4+1]+td[i*4+2]; } tm/=N*3;
-  const tv=new Float32Array(N*3); let tn=0;
-  for(let i=0;i<N;i++)for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; }
-  tn=Math.sqrt(tn);
-  function nccAt(x,y){
-    const lx=x-ox, ly=y-oy;
-    if(lx<0||ly<0||lx+iconW>W||ly+iconH>H) return -1;
-    let sm=0; for(let j=0;j<iconH;j++)for(let i=0;i<iconW;i++){ const idx=((ly+j)*W+(lx+i))*4; sm+=fdata[idx]+fdata[idx+1]+fdata[idx+2]; } sm/=N*3;
-    let cov=0,sn=0;
-    for(let j=0;j<iconH;j++)for(let i=0;i<iconW;i++){ const idx=((ly+j)*W+(lx+i))*4; for(let k=0;k<3;k++){ const sv=fdata[idx+k]-sm; cov+=sv*tv[(j*iconW+i)*3+k]; sn+=sv*sv; } }
-    return (sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):-1;
-  }
-  const R=2, out=[];
-  for(const p of coarse){
-    let bx=p.x, by=p.y, bs=-1;
-    for(let dy=-R;dy<=R;dy++)for(let dx=-R;dx<=R;dx++){
-      const s=nccAt(p.x+dx, p.y+dy);
-      if(s>bs){ bs=s; bx=p.x+dx; by=p.y+dy; }
-    }
-    if(bs>0.45) out.push({x:bx, y:by, sc:bs});
-  }
-  // 按分数排序，去重（精修后同一图标可能重叠）
-  out.sort((a,b)=>b.sc-a.sc);
-  const kept=[];
-  for(const o of out){
-    if(kept.some(k=>Math.abs(k.x-o.x)<iconW*0.5 && Math.abs(k.y-o.y)<iconH*0.5)) continue;
-    kept.push({x:o.x, y:o.y});
-  }
-  return kept;
 }
 function findIconPositions(frame){
   // 用上次网格算 region（±3 格），背包移动时只扫附近，大幅提速且避免误检其他区域
@@ -1019,65 +974,7 @@ function findIconPositions(frame){
       }
     }
   }
-  // 双开/多窗口：图标可能来自多个背包，按空间聚簇。保存所有簇，主簇先取最大簇
-  state.bt.clusters=null;
-  if(found.positions.length > 5){
-    const cls = clusterIcons(found.positions, Math.max(100, found.iconW*6));
-    if(cls.length > 1){
-      cls.sort((a,b)=>b.length-a.length);
-      state.bt.clusters=cls; // 保留所有簇，供坐标位置反选正确的背包
-      found.positions = cls[0];
-    }
-    // 过滤主簇内的离群点（低阈值引入的误检噪声，离簇质心过远）
-    found.positions = filterOutliers(found.positions, found.iconW);
-  }
   return {positions:found.positions, iconW:found.iconW, iconH:found.iconH, scale};
-}
-/* 过滤簇内离群点：离质心距离超过 3.5×iconW 的图标视为误检噪声（真背包图标集中在 5×4 网格内）；迭代两次 */
-function filterOutliers(positions, iconW){
-  if(positions.length<6) return positions;
-  const iw=iconW||98;
-  let pts=positions;
-  for(let it=0; it<2; it++){
-    if(pts.length<5) break;
-    const cx=pts.reduce((s,p)=>s+p.x+iw/2,0)/pts.length;
-    const cy=pts.reduce((s,p)=>s+p.y+iw/2,0)/pts.length;
-    const maxD=iw*3.5;
-    const filtered=pts.filter(p=>Math.hypot(p.x+iw/2-cx, p.y+iw/2-cy)<maxD);
-    if(filtered.length===pts.length) break; // 收敛
-    pts=filtered;
-  }
-  return pts.length>=3?pts:positions;
-}
-/* 坐标文字位置 (cx,cy) → 找到它上方所属的图标簇（用于双开时反选正确的背包） */
-function clusterAtCoord(cx, cy){
-  const clusters=state.bt.clusters;
-  if(!clusters || clusters.length<2) return null;
-  const iw=state.bt.iconWActual||98;
-  // 找 cx,cy 下方/附近（含上方）最近的簇：坐标在被悬停宝图下方，簇在坐标上方
-  let best=null, bestDist=Infinity;
-  for(const cl of clusters){
-    for(const p of cl){
-      const pcx=p.x+iw/2, pcy=p.y+iw/2;
-      if(pcy >= cy) continue; // 图标在坐标上方
-      const d=Math.abs(pcx-cx)+Math.abs(pcy-cy)*2;
-      if(d<bestDist){ bestDist=d; best=cl; }
-    }
-  }
-  return best;
-}
-/* 图标空间聚簇：相邻（间距 < gap）归为一簇，用于区分双开窗口的多个背包 */
-function clusterIcons(positions, gap){
-  const clusters=[];
-  for(const p of positions){
-    let found=-1;
-    for(let i=0;i<clusters.length;i++){
-      if(clusters[i].some(q=>Math.abs(q.x-p.x)<gap && Math.abs(q.y-p.y)<gap)){ found=i; break; }
-    }
-    if(found>=0) clusters[found].push(p);
-    else clusters.push([p]);
-  }
-  return clusters;
 }
 function scaledIconData(tw,th){
   const tc=document.createElement('canvas'); tc.width=tw; tc.height=th;
@@ -1133,25 +1030,6 @@ function inferGrid(found, frame){
   const top = Math.min(...cy) - gy/2;
   return {x:Math.round(left), y:Math.round(top), w:Math.round(gx*5), h:Math.round(gy*4)};
 }
-function findEvenLines(lines, gap){
-  lines=[...lines].sort((a,b)=>a-b);
-  let best=[];
-  const tol=Math.max(6,Math.round(gap*0.15));
-  for(let i=0;i<lines.length;i++){
-    const grp=[lines[i]]; let cur=lines[i];
-    for(let j=i+1;j<lines.length;j++){ if(Math.abs(lines[j]-cur-gap)<=tol){ grp.push(lines[j]); cur=lines[j]; } }
-    if(grp.length>best.length) best=grp;
-  }
-  return best;
-}
-function consensus(vals, gap){
-  vals.sort((a,b)=>a-b);
-  let best=[], cur=[vals[0]];
-  for(let i=1;i<vals.length;i++){ if(vals[i]-cur[cur.length-1]<gap*0.28) cur.push(vals[i]); else{ if(cur.length>best.length)best=cur; cur=[vals[i]]; } }
-  if(cur.length>best.length) best=cur;
-  if(!best.length) return null;
-  return best.reduce((a,b)=>a+b,0)/best.length;
-}
 function cluster1d(vals, tol){ const arr=[]; for(const v of vals){ if(arr.length&&v-arr[arr.length-1]<=tol){ arr[arr.length-1]=(arr[arr.length-1]+v)/2; } else arr.push(v); } return arr; }
 function medianGap(vals){ if(vals.length<2) return null; const gaps=[]; for(let i=1;i<vals.length;i++) gaps.push(vals[i]-vals[i-1]); gaps.sort((a,b)=>a-b); return gaps[Math.floor(gaps.length/2)]; }
 /* 从一维坐标中找「最长等间距序列」的间距（比中位数抗误检：误检点会把间距拆成两半，中位数被污染）。
@@ -1173,77 +1051,7 @@ function bestGap(vals, minGap, maxGap){
   }
   return bestGap;
 }
-function detectBorder(frame, region){
-  // 只用蓝灰色检测网格线（斜面边框的亮色边 RGB 83,99,136 = BGR 136,99,83，干净可靠；紫色过于杂乱不可用）
-  // 性能：region 内用 0.5 降采样统计（去掉 sqrt，用平方距离），再回到全分辨率精修峰值 ±4px（像素级精度）
-  let SC=0.5, x0=0, y0=0, x1=frame.width, y1=frame.height;
-  if(region){
-    x0=Math.max(0,Math.round(region.x0)); y0=Math.max(0,Math.round(region.y0));
-    x1=Math.min(frame.width,Math.round(region.x1)); y1=Math.min(frame.height,Math.round(region.y1));
-    if(x1-x0<20||y1-y0<20) return {vlines:[],hlines:[]};
-  }
-  const {data,w,h}=downsampleData(frame,SC);
-  const T=[136,99,83], TOL2=20*20;
-  const colcnt=new Float32Array(w).fill(0), rowcnt=new Float32Array(h).fill(0);
-  const sx0=Math.max(0,Math.round(x0*SC)), sy0=Math.max(0,Math.round(y0*SC));
-  const sx1=Math.min(w,Math.round(x1*SC)), sy1=Math.min(h,Math.round(y1*SC));
-  for(let y=sy0;y<sy1;y++)for(let x=sx0;x<sx1;x++){
-    const i=(y*w+x)*4; const r=data[i],g=data[i+1],b=data[i+2]; // RGBA
-    const db=b-T[0], dg=g-T[1], dr=r-T[2]; // T 为 BGR
-    if(db*db+dg*dg+dr*dr<TOL2){ colcnt[x]++; rowcnt[y]++; }
-  }
-  const vPeaks=extractLines(colcnt), hPeaks=extractLines(rowcnt);
-  // 精修：降采样峰值映射回全分辨率后，在 ±4px 内精确找峰值（蓝灰线 1-2px 宽，降采样会损失精度）
-  const vlines=refineLines(frame, vPeaks, 1/SC, x0, x1, y0, y1, true);
-  const hlines=refineLines(frame, hPeaks, 1/SC, x0, x1, y0, y1, false);
-  return {vlines, hlines};
-}
-function refineLines(frame, peaks, invSC, x0, x1, y0, y1, isVertical){
-  if(!peaks.length) return [];
-  const T=[136,99,83], TOL2=20*20;
-  const W=frame.width, H=frame.height;
-  const ctx2d=frame.getContext('2d',{willReadFrequently:true});
-  const res=[];
-  for(const pk of peaks){
-    const approx=Math.round(pk*invSC);
-    let bestPos=approx, bestCnt=-1;
-    const lo=Math.max(0, approx-4), hi=Math.min((isVertical?W:H)-1, approx+4);
-    for(let p=lo;p<=hi;p++){
-      let cnt=0;
-      if(isVertical){
-        if(p<0||p>=W) continue;
-        const sy=Math.max(0,y0), sh=Math.min(H,y1)-sy; if(sh<=0) continue;
-        const d=ctx2d.getImageData(p,sy,1,sh).data;
-        for(let i=0;i<d.length;i+=4){ const b=d[i+2],g=d[i+1],r=d[i]; const db=b-T[0],dg=g-T[1],dr=r-T[2]; if(db*db+dg*dg+dr*dr<TOL2) cnt++; }
-      }else{
-        if(p<0||p>=H) continue;
-        const sx=Math.max(0,x0), sw=Math.min(W,x1)-sx; if(sw<=0) continue;
-        const d=ctx2d.getImageData(sx,p,sw,1).data;
-        for(let i=0;i<d.length;i+=4){ const b=d[i+2],g=d[i+1],r=d[i]; const db=b-T[0],dg=g-T[1],dr=r-T[2]; if(db*db+dg*dg+dr*dr<TOL2) cnt++; }
-      }
-      if(cnt>bestCnt){ bestCnt=cnt; bestPos=p; }
-    }
-    res.push(bestPos);
-  }
-  return res;
-}
-function extractLines(cnt){
-  const n=cnt.length; const sm=new Float32Array(n);
-  for(let i=0;i<n;i++){ sm[i]=(cnt[Math.max(0,i-1)]+cnt[i]+cnt[Math.min(n-1,i+1)])/3; }
-  // 蓝灰网格线是最高峰，阈值取最高峰的一半，能过滤散乱噪声
-  let mx=0; for(let i=0;i<n;i++) if(sm[i]>mx) mx=sm[i];
-  const th=Math.max(20, mx*0.5);
-  const peaks=[]; let i=0;
-  while(i<n){ if(sm[i]>th){ let j=i; while(j<n&&sm[j]>th) j++; let pk=i; for(let k=i;k<j;k++) if(sm[k]>sm[pk]) pk=k; peaks.push(pk); i=j; } else i++; }
-  const merged=[]; for(const p of peaks){ if(merged.length&&p-merged[merged.length-1]<10){ merged[merged.length-1]=Math.round((merged[merged.length-1]+p)/2); } else merged.push(p); }
-  return merged;
-}
-
 /* ===================== 藏宝图：检测宝图 + 光标 + 坐标 ===================== */
-function btNCC(imgData){ const t=state.bt.iconData.data, s=imgData.data, N=imgData.width*imgData.height;
-  let ms=0,mt=0; for(let i=0;i<N;i++){ ms+=s[i*4]+s[i*4+1]+s[i*4+2]; mt+=t[i*4]+t[i*4+1]+t[i*4+2]; } ms/=N*3; mt/=N*3;
-  let cov=0,vs=0,vt=0; for(let i=0;i<N;i++)for(let k=0;k<3;k++){ const a=s[i*4+k]-ms,b=t[i*4+k]-mt; cov+=a*b;vs+=a*a;vt+=b*b; }
-  if(vs<1e-6||vt<1e-6) return 0; return cov/Math.sqrt(vs*vt); }
 function detectMaps(frame){
   // 用精修后的图标位置映射到 4×5 格子（比逐格 NCC 更稳）
   const g=state.bt.grid; if(!g) return 0;
@@ -1292,53 +1100,6 @@ function matchTemplate(frame, tplImg, tplW, tplH, useMask, scale, step, minScore
   }}
   if(bestSc<minScore) return null;
   return {x:Math.round(bestX/scale), y:Math.round(bestY/scale), score:bestSc};
-}
-function detectTooltip(frame){
-  // 识别藏宝图 tooltip 固定部分（标题+描述+类型，精确模板 360×107）
-  // 性能：单尺度（tooltip 与宝图图标同游戏、缩放一致，用 iconWActual 推算）+ 网格附近区域限制
-  if(!state.bt.tooltipImg) return null;
-  const gameScale = (state.bt.iconWActual>8) ? state.bt.iconWActual/98 : (state.bt.lastScale||1);
-  // 搜索区域：tooltip 出现在被悬停宝图附近（下方/右侧），限定在背包网格四周
-  let region=null;
-  if(state.bt.grid){
-    const g=state.bt.grid;
-    region={ x0:Math.max(0,Math.round(g.x-g.w*0.5)), y0:Math.max(0,Math.round(g.y-g.h*0.4)),
-             x1:Math.min(frame.width,Math.round(g.x+g.w*1.6)), y1:Math.min(frame.height,Math.round(g.y+g.h*1.5)) };
-  }
-  let best=null;
-  const scales = (gameScale>0.2&&gameScale<4) ? [gameScale*0.85, gameScale, gameScale*1.15] : [0.4,0.6,0.8,1.0];
-  for(const s of scales){
-    const t=matchTemplate(frame, state.bt.tooltipImg, state.bt.tooltipW, state.bt.tooltipH, false, 0.2, 3, 0.5, s, region);
-    if(t && (!best || t.score>best.score)){ t.scale=s; best=t; }
-  }
-  return best; // {x,y,score,scale} tooltip 固定部分（面板）左上角
-}
-function tooltipToCell(tip){
-  // tooltip 出现在被悬停宝图的下方：找 tooltip 上方最近、x 接近的宝图格子
-  const g=state.bt.grid; if(!g||!tip) return -1;
-  const tipX = tip.x + state.bt.tooltipW*(tip.scale||1)/2;
-  const tipY = tip.y;
-  return coordToCell(tipX, tipY);
-}
-/* 坐标文字中心 (cx,cy) → 反推被悬停宝图格子（坐标文字在被悬停宝图下方） */
-function coordToCell(cx, cy){
-  const g=state.bt.grid; if(!g) return -1;
-  let bestIdx=-1, bestScore=-Infinity;
-  for(let i=0;i<state.bt.iconPositions.length;i++){
-    const p=state.bt.iconPositions[i];
-    const pcx=p.x + state.bt.iconWActual/2, pcy=p.y + state.bt.iconHActual/2;
-    if(pcy >= cy) continue; // 宝图必须在坐标文字上方
-    const dy = cy - pcy;
-    const dx = Math.abs(pcx - cx);
-    const score = -(dy*2 + dx); // y 距离权重更高
-    if(score > bestScore){ bestScore=score; bestIdx=i; }
-  }
-  if(bestIdx<0) return -1;
-  const p=state.bt.iconPositions[bestIdx];
-  const c=Math.floor((p.x + state.bt.iconWActual/2 - g.x)/(g.w/5));
-  const r=Math.floor((p.y + state.bt.iconHActual/2 - g.y)/(g.h/4));
-  if(r<0||r>3||c<0||c>4) return -1;
-  return r*5+c;
 }
 /* 检测背包格子的「金橙色高亮描边」——用户点击/选中某格时游戏给该格边框加金橙色高亮（比 tooltip 文字检测可靠得多）。
    返回金橙色像素的中心 {cx,cy}，未检测到返回 null。
