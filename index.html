@@ -565,7 +565,7 @@ function matchIcon(crop, indices){
   const sc=Math.min(S/cw, S/ch);
   ng.drawImage(crop, (S-cw*sc)/2, (S-ch*sc)/2, cw*sc, ch*sc);
   const np=ng.getImageData(0,0,S,S).data;
-  let bestIdx=-1,bestScore=-2;
+  let bestIdx=-1,bestScore=-2,secondScore=-2;
   // 若指定 indices（如四个选项候选），只在这些里匹配，区分度大幅提高；否则全量匹配
   const list = indices && indices.length ? indices : state.templates.map((_,i)=>i);
   const cropHue = hueHistOfCrop(np);
@@ -575,10 +575,19 @@ function matchIcon(crop, indices){
     // 实测 hue 相关对正确候选区分度最好（8.png 姐妹同心 hue=0.925 vs 干扰项 0.73/0.74）。
     const rgb=maskedNCC(np,t);
     const hue=hueCorr(cropHue,t.hueHist);
-    const sc=0.45*rgb+0.55*hue;
-    if(sc>bestScore){ bestScore=sc; bestIdx=i; } }
-  if(bestIdx<0) return {index:-1,name:'',category:'',color:'',score:-1};
-  return {index:bestIdx,name:bank[bestIdx].name,category:bank[bestIdx].category,color:bank[bestIdx].color,score:bestScore};
+    // 权重：rgb（RGB三通道NCC，形状+颜色）主导 0.75，hue（色相）辅助 0.25。
+    // 关键修复：旧权重 0.45rgb+0.55hue 中 hue 占比过高。实测「游戏窗口」共享时大图标与模板的
+    // hue 相关恒为负（约 -0.09）且无区分度（所有候选都接近），0.55 权重把正确候选分数从 rgb 0.633 拉到 0.235。
+    // 而 rgb 区分度好（正确候选 0.633 vs 干扰 0.24~0.33）。故 rgb 主导、hue 仅作微弱辅助。
+    const sc=0.75*rgb+0.25*hue;
+    if(sc>bestScore){ secondScore=bestScore; bestScore=sc; bestIdx=i; }
+    else if(sc>secondScore){ secondScore=sc; } }
+  // 关键修复：置信度下限。框没对准大图标时，综合分极低（实测 51.png 框偏时仅 0.024，却仍输出「健身术」），
+  // 背后只是乱码/背景像素。score < MIN_SCORE 判定「未匹配」，不再乱输出结果。
+  // 综合分正常匹配在 0.5~0.95（显示 75%~97.5%）；低于 0.25（显示 62.5%）基本是背景/错框。
+  const MIN_SCORE = 0.25;
+  if(bestIdx<0 || bestScore<MIN_SCORE) return {index:-1,name:'',category:'',color:'',score:bestScore,secondScore};
+  return {index:bestIdx,name:bank[bestIdx].name,category:bank[bestIdx].category,color:bank[bestIdx].color,score:bestScore,secondScore};
 }
 /* 计算 crop 的 HSV 色相直方图（16 bins，只用有颜色像素），与模板预计算的 hueHist 做相关 */
 function hueHistOfCrop(np){
@@ -752,39 +761,78 @@ async function autoLocateJieri(){
     let tip=null;
     for(const l of lines){ if(l.text.includes('请指出')||l.text.includes('技能或法术')||l.text.includes('下图')){ tip=l; break; } }
     if(!tip){ $('ocr-status').textContent='定位失败：未找到答题提示文字，请手动调整区域'; return; }
-    // 2. 在提示文字下方找 4 个选项技能名（字典匹配 + 2×2 布局聚类）
+    // 2. 在提示文字下方找选项技能名（字典匹配）。选项是固定 2×2 布局（左上/右上/左下/右下）。
+    //    关键修复：OCR 常漏读某个选项（选项文字较小/颜色浅），旧逻辑要求「2 行且每行≥2」太严格，
+    //    漏读一个就整个定位失败、框停留在硬编码默认值（24.png 布局）。放宽为「≥3 个候选即可推断 2×2」。
     const cands=[];
     for(const l of lines){
       if(l.y0 < tip.y1-5) continue;             // 只取提示文字下方
       const nm=bestDictMatch(l.text);
       if(nm.name && textSimilarity(l.text, nm.name)>0.45){ cands.push({name:nm.name, x0:l.x0,y0:l.y0,x1:l.x1,y1:l.y1}); }
     }
-    cands.sort((a,b)=>a.y0-b.y0);
-    const rows=[];
-    for(const c of cands){ let f=-1; for(let i=0;i<rows.length;i++){ if(Math.abs(c.y0-rows[i][0].y0)<30){ f=i; break; } } if(f>=0) rows[f].push(c); else rows.push([c]); }
-    const validRows=rows.filter(r=>r.length>=2).slice(0,2);
-    if(validRows.length<2){ $('ocr-status').textContent='定位失败：选项识别不足，请手动调整区域'; return; }
-    const row1=validRows[0].sort((a,b)=>a.x0-b.x0);
-    const row2=validRows[1].sort((a,b)=>a.x0-b.x0);
-    const opts=[row1[0], row1[1], row2[0], row2[1]];   // 左上、右上、左下、右下
+    if(cands.length<3){ $('ocr-status').textContent='定位失败：选项识别不足（'+cands.length+'个），请手动调整区域'; return; }
+    // 按 y 分成上下两行（用候选的 y 中位数分割，比聚类容差更鲁棒，避免标签行/文字行被错误合并）
+    const yVals=cands.map(c=>c.y0).sort((a,b)=>a-b);
+    const midY=yVals[Math.floor(yVals.length/2)];
+    let topRow=cands.filter(c=>c.y0<midY), botRow=cands.filter(c=>c.y0>=midY);
+    // 若某行为空（候选全在一行），按 x 中位数左右分割
+    if(topRow.length===0||botRow.length===0){
+      const xVals=cands.map(c=>c.x0).sort((a,b)=>a-b);
+      const midX=xVals[Math.floor(xVals.length/2)];
+      topRow=cands.filter(c=>c.x0<midX); botRow=cands.filter(c=>c.x0>=midX);
+    }
+    topRow.sort((a,b)=>a.x0-b.x0); botRow.sort((a,b)=>a.x0-b.x0);
+    // 构建 2×2：每行取左/右；若某行只有 1 个，用另一行的 x 位置推断缺失列
+    const TL=topRow[0], TR=topRow[topRow.length-1], BL=botRow[0], BR=botRow[botRow.length-1];
+    const opts=[TL, TR, BL, BR];   // 左上、右上、左下、右下
     // 3. 设置 4 个选项框（略放大文字框，完整覆盖技能名文字）
     const pad=0.004;
     for(let i=0;i<4;i++){
-      const o=opts[i], r=state.regions['opt'+(i+1)];
+      const o=opts[i]; if(!o) continue;
+      const r=state.regions['opt'+(i+1)];
       r.x=clamp(o.x0/frame.width-pad,0,1); r.y=clamp(o.y0/frame.height-pad,0,1);
       r.w=clamp((o.x1-o.x0)/frame.width+pad*2,0.02,1); r.h=clamp((o.y1-o.y0)/frame.height+pad*2,0.02,1);
     }
-    // 4. 图标框：用「提示文字左侧」固定布局定位（大图标在提示文字左侧、同一水平线）。
-    //    关键发现（39/42.png 实测）：大图标不在提示文字正下方，而在其左侧同一水平线；
-    //    且大图标（游戏渲染）与原始 PNG 模板的 matchTemplate 分数仅约 0.4，候选匹配定位不可靠
-    //    （会误匹配到游戏技能栏的同名图标、把框拖偏）。固定布局关系更稳定。
+    // 4. 图标框定位：候选匹配优先（大图标在提示文字左下方，用 4 个候选在提示文字附近搜索），
+    //    分数不足时用修正后的固定公式兜底。
+    //    关键修复：旧固定公式 iconCx=tip.x0-tipW*0.3 系数 0.3 是「整个屏幕」推导的，
+    //    在「游戏窗口」共享时系统性偏左（实测 51.png 偏移 0.147×tipW，大图标边长=3×tipH 而非 2.5×tipH）。
     const tipW=tip.x1-tip.x0, tipH=tip.y1-tip.y0;
-    const side=Math.max(tipH*2.5, 40);      // 图标边长≈提示文字高度的 2.5 倍（39/42.png 实测）
-    const iconCx=tip.x0 - tipW*0.3;          // 大图标中心在提示文字左边界左侧 0.3 倍提示宽处
-    const iconCy=(tip.y0+tip.y1)/2 + tipH*0.8; // 大图标中心略低于提示文字中心（实测约低 0.8 倍提示高）
-    const x0=iconCx - side/2, y0=iconCy - side/2;
-    state.regions.icon={ x:clamp(x0/frame.width,0,1), y:clamp(y0/frame.height,0,1),
-                        w:Math.min(1, side/frame.width), h:Math.min(1, side/frame.height) };
+    const indices=[]; for(const o of opts){ if(!o) continue; const i=bank.findIndex(d=>d.name===o.name); if(i>=0) indices.push(i); }
+    let iconLoc=null;
+    if(indices.length>=2){
+      // 搜索范围覆盖大图标可能出现的区域：提示文字左侧 0.6×宽、上方 4×高、下方 3×高
+      // （实测大图标在提示文字上方/左侧/同一水平线均出现，位置随窗口布局变化）
+      const region={ x0:Math.max(0,tip.x0-tipW*0.6), y0:Math.max(0,tip.y0-tipH*4),
+                    x1:Math.min(frame.width,tip.x1), y1:Math.min(frame.height,tip.y1+tipH*3) };
+      let best={i:-1,score:-2,x:0,y:0,w:0,h:0,s:1};
+      for(const i of indices){
+        const img=new Image(); img.src=bank[i].icon;
+        await new Promise(r=>{ img.onload=r; img.onerror=r; });
+        const iw=img.naturalWidth, ih=img.naturalHeight; if(!iw) continue;
+        for(const s of [1.2,1.5,1.8,2.2,2.8]){
+          const m=matchTemplate(frame,img,iw,ih,false,0.5,3,0.5,s,region);
+          if(m && m.score>best.score){ best.i=i; best.score=m.score; best.x=m.x; best.y=m.y; best.s=s; best.w=Math.round(iw*s); best.h=Math.round(ih*s); }
+        }
+      }
+      if(best.i>=0) iconLoc=best;
+    }
+    if(iconLoc && iconLoc.score>0.55){
+      // 候选匹配定位成功：图标框设为正方形、略大于图标（四边等距）
+      const pad2=1.2, side=Math.max(iconLoc.w,iconLoc.h)*pad2;
+      const cx=iconLoc.x+iconLoc.w/2, cy=iconLoc.y+iconLoc.h/2;
+      const ix0=cx-side/2, iy0=cy-side/2;
+      state.regions.icon={ x:clamp(ix0/frame.width,0,1), y:clamp(iy0/frame.height,0,1),
+                          w:Math.min(1,side/frame.width), h:Math.min(1,side/frame.height) };
+    } else {
+      // 固定公式兜底（修正系数：side=3×tipH、iconCx=tip.x0-0.9×side、iconCy=提示中心+0.3×tipH）
+      const side=Math.max(tipH*3.0, 40);
+      const iconCx=tip.x0 - side*0.9;
+      const iconCy=(tip.y0+tip.y1)/2 + tipH*0.3;
+      const ix0=iconCx - side/2, iy0=iconCy - side/2;
+      state.regions.icon={ x:clamp(ix0/frame.width,0,1), y:clamp(iy0/frame.height,0,1),
+                          w:Math.min(1,side/frame.width), h:Math.min(1,side/frame.height) };
+    }
     saveRegions();
     state.iconHash=null; state.lastIconHash='';
     $('ocr-status').textContent='定位完成，正在识别…';
@@ -829,10 +877,23 @@ async function recognize(manual){
     //      导致答案永远不更新 →「四个选项识别」不工作。frameHash 已保证题目锁定，无需二次去抖动。）
     if(match.index>=0){
       state.lastIconHash=String(match.index);
-      const ans=findAnswer(texts,match.name); state.lastAnswer=ans.index>=0?ans.index+1:null;
-      renderOptions(ans.details,match.name,ans.index); $('ocr-status').textContent=state.lastAnswer?('已识别：选项 '+state.lastAnswer):'未找到匹配选项';
+      // 关键修复：匹配置信度不足时「不确认答案」——只显示识别结果作参考，不框选，避免低置信度误框。
+      // 权重调整后（0.75rgb+0.25hue）正确匹配约 0.4~0.7，框偏乱码 < 0.1。
+      // 确认答案需 score >= CONFIRM_SCORE 且与次高候选差距明显（margin）。
+      const CONFIRM_SCORE = 0.35;
+      const margin = match.secondScore!=null ? (match.score-match.secondScore) : 0;
+      if(match.score >= CONFIRM_SCORE && margin >= 0.08){
+        const ans=findAnswer(texts,match.name); state.lastAnswer=ans.index>=0?ans.index+1:null;
+        renderOptions(ans.details,match.name,ans.index); $('ocr-status').textContent=state.lastAnswer?('已识别：选项 '+state.lastAnswer):'未找到匹配选项';
+      } else {
+        state.lastAnswer=null;
+        // 仍显示选项 OCR 结果（供参考），但不框选答案（hitIndex=-1）
+        const ansRef=findAnswer(texts,match.name);
+        renderOptions(ansRef.details,match.name,-1);
+        $('ocr-status').textContent='识别结果「'+match.name+'」置信度偏低（'+Math.round((match.score+1)/2*100)+'%），未框选答案，请点「更新位置」校准图标框';
+      }
     }
-    else{ $('ocr-status').textContent='未匹配到图标，请调整图标区域'; }
+    else{ state.lastAnswer=null; $('ocr-status').textContent='未匹配到图标，请调整图标区域（可点「更新位置」自动校准）'; }
   }catch(e){ $('ocr-status').textContent='识别出错：'+(e&&e.message?e.message:e); }
   finally{ state.recognizing=false; }
 }
