@@ -553,39 +553,63 @@ function autoTrim(srcCanvas){
     c.getContext('2d').drawImage(srcCanvas,minX,minY,fw,fh,0,0,c.width,c.height); return c; }
   return srcCanvas;
 }
-function matchIcon(crop, indices){
-  // 先裁剪掉背景边缘（图标框可略大于图标，autoTrim 去掉四周背景让图标填满，提高 NCC 重合度）
-  crop=autoTrim(crop);
-  const S=64; const norm=document.createElement('canvas'); norm.width=S;norm.height=S;
-  const ng=norm.getContext('2d',{willReadFrequently:true});
-  // 关键修复：等比缩放 + 居中（与 loadIconAsData 完全一致），而不是 drawImage(crop,0,0,S,S) 强制拉伸。
-  // 旧代码把矩形裁剪区非等比拉伸成 64×64，图标被拉伸变形，与等比缩放的模板形状不匹配，
-  // NCC/色相分数下降——这是「打坐/调息/反间之计等图标反复识别错误」+「识别结果图标变形」的根因。
+/* alpha-masked 滑窗模板匹配：在 crop 内以多尺度滑动模板（技能图标），返回最大匹配分。
+   关键：不再依赖 autoTrim 的「四角背景估计」——图标框移动一点，autoTrim 就给出不同的前景包围盒、
+   进而 resize 出的 64×64 内容不同，导致 NCC 分数洗牌、结果跳变（56/57 同一图标结果不同）。
+   滑窗让模板在整个框内滑动找最优位置，天然对「图标在框内哪个位置」不敏感，结果稳定。 */
+async function slideMatch(crop, iconDataUrl){
+  const img=new Image(); img.src=iconDataUrl;
+  await new Promise(r=>{ img.onload=r; img.onerror=r; });
+  const iw=img.naturalWidth, ih=img.naturalHeight;
+  if(!iw||!ih) return -2;
   const cw=crop.width, ch=crop.height;
-  const sc=Math.min(S/cw, S/ch);
-  ng.drawImage(crop, (S-cw*sc)/2, (S-ch*sc)/2, cw*sc, ch*sc);
-  const np=ng.getImageData(0,0,S,S).data;
-  let bestIdx=-1,bestScore=-2,secondScore=-2;
-  // 若指定 indices（如四个选项候选），只在这些里匹配，区分度大幅提高；否则全量匹配
+  if(cw<8||ch<8) return -2;
+  const cdata=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,cw,ch).data;
+  let best=-2;
+  // 整个屏幕共享时大图标仅约 40-56px（接近模板原始 40px），游戏窗口共享时更大；覆盖 1.0~3.8 倍。
+  // 实测：不 mask（含透明黑背景）比 alpha mask 更稳——透明黑背景恰好与「看图说话」暗色面板相关，
+  // 且小图标用 alpha mask 只剩极少像素、噪声大（cv2 对比验证 56/57/60/63 正确答案均 top1）。
+  const scales=[1.0,1.3,1.6,2.0,2.5,3.0,3.8];
+  for(const s of scales){
+    const tw=Math.max(4,Math.round(iw*s)), th=Math.max(4,Math.round(ih*s));
+    if(tw>cw || th>ch) continue;
+    const tc=document.createElement('canvas'); tc.width=tw; tc.height=th;
+    const tg=tc.getContext('2d'); tg.drawImage(img,0,0,tw,th);
+    const td=tg.getImageData(0,0,tw,th).data;
+    const N=tw*th;
+    let tm=0; for(let i=0;i<N;i++){ tm+=td[i*4]+td[i*4+1]+td[i*4+2]; } tm/=N*3;
+    const tv=new Float32Array(N*3); let tn=0;
+    for(let i=0;i<N;i++){ for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; } }
+    tn=Math.sqrt(tn);
+    const step=2;
+    for(let y=0;y+th<=ch;y+=step){ for(let x=0;x+tw<=cw;x+=step){
+      let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; sm+=cdata[idx]+cdata[idx+1]+cdata[idx+2]; } sm/=N*3;
+      let cov=0,sn=0;
+      for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; for(let k=0;k<3;k++){ const sv=cdata[idx+k]-sm; cov+=sv*tv[(j*tw+i)*3+k]; sn+=sv*sv; } }
+      const sc=(sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):0;
+      if(sc>best) best=sc;
+    }}
+  }
+  return best;
+}
+async function matchIcon(crop, indices){
+  // 小图标先放大到 96px（整个屏幕共享时大图标仅 40-56px，放大给匹配更多像素、提升区分度与稳定性）
+  let work=crop;
+  if(crop.width<90 && crop.height<90){
+    const sc=90/Math.max(crop.width,crop.height);
+    work=document.createElement('canvas'); work.width=Math.max(8,Math.round(crop.width*sc)); work.height=Math.max(8,Math.round(crop.height*sc));
+    work.getContext('2d').drawImage(crop,0,0,work.width,work.height);
+  }
+  // 只在这些候选里匹配（四个选项）；调用方保证 indices 非空，此处仍做兜底
   const list = indices && indices.length ? indices : state.templates.map((_,i)=>i);
-  const cropHue = hueHistOfCrop(np);
-  for(let k=0;k<list.length;k++){ const i=list[k]; const t=state.templates[i]; if(!t||t.n<20) continue;
-    // 匹配 = RGB三通道NCC（形状+颜色） + HSV色相直方图相关（颜色鲁棒）。
-    // 游戏渲染会把暗色图标提亮/发光，灰度 NCC 区分度差（深色图标灰度接近黑）；
-    // 实测 hue 相关对正确候选区分度最好（8.png 姐妹同心 hue=0.925 vs 干扰项 0.73/0.74）。
-    const rgb=maskedNCC(np,t);
-    const hue=hueCorr(cropHue,t.hueHist);
-    // 权重：rgb（RGB三通道NCC，形状+颜色）主导 0.75，hue（色相）辅助 0.25。
-    // 关键修复：旧权重 0.45rgb+0.55hue 中 hue 占比过高。实测「游戏窗口」共享时大图标与模板的
-    // hue 相关恒为负（约 -0.09）且无区分度（所有候选都接近），0.55 权重把正确候选分数从 rgb 0.633 拉到 0.235。
-    // 而 rgb 区分度好（正确候选 0.633 vs 干扰 0.24~0.33）。故 rgb 主导、hue 仅作微弱辅助。
-    const sc=0.75*rgb+0.25*hue;
+  let bestIdx=-1,bestScore=-2,secondScore=-2;
+  for(const i of list){
+    const sc = await slideMatch(work, bank[i].icon);
     if(sc>bestScore){ secondScore=bestScore; bestScore=sc; bestIdx=i; }
-    else if(sc>secondScore){ secondScore=sc; } }
-  // 关键修复：置信度下限。框没对准大图标时，综合分极低（实测 51.png 框偏时仅 0.024，却仍输出「健身术」），
-  // 背后只是乱码/背景像素。score < MIN_SCORE 判定「未匹配」，不再乱输出结果。
-  // 综合分正常匹配在 0.5~0.95（显示 75%~97.5%）；低于 0.25（显示 62.5%）基本是背景/错框。
-  const MIN_SCORE = 0.25;
+    else if(sc>secondScore) secondScore=sc;
+  }
+  // 置信度下限：分数过低说明框没对准图标（背景/乱码），判定「未匹配」，不输出结果
+  const MIN_SCORE = 0.20;
   if(bestIdx<0 || bestScore<MIN_SCORE) return {index:-1,name:'',category:'',color:'',score:bestScore,secondScore};
   return {index:bestIdx,name:bank[bestIdx].name,category:bank[bestIdx].category,color:bank[bestIdx].color,score:bestScore,secondScore};
 }
@@ -867,33 +891,32 @@ async function recognize(manual){
     $('ocr-status').textContent='正在识别四个选项…';
     const texts=await ocrOptions(frame);
     const names=texts.map(t=>bestDictMatch(t).name);
-    const indices=[]; for(const n of names){ if(!n) continue; const i=bank.findIndex(d=>d.name===n); if(i>=0) indices.push(i); }
-    // 2. 固定区域匹配大图标（不自动定位，用户通过「更新位置」按钮手动校准）
+    const indices=[]; for(const n of names){ if(!n) continue; const i=bank.findIndex(d=>d.name===n); if(i>=0 && !indices.includes(i)) indices.push(i); }
+    // 2. 固定区域匹配大图标（不自动定位，用户通过「更新位置」按钮手动校准）。
+    //    硬约束：答案必是 4 个选项之一，只在 4 个候选里匹配；选项 OCR 不足(<2)时无法可靠判断，
+    //    直接判「未识别」，绝不回退到 320 全量匹配（回退会产生「不在选项中」的错误结果）。
     const crop=cropRegion(frame,state.regions.icon);
-    const match = (indices.length>=2) ? matchIcon(crop, indices) : matchIcon(crop);
+    const match = (indices.length>=2) ? await matchIcon(crop, indices) : {index:-1,name:'',category:'',color:'',score:-1,secondScore:-1};
     showResult(match, match.index>=0?crop:null);
     // 3. 答案：题目确认变化（或手动）→ 立即更新，不再用「连续2次一致」去抖动
     //    （旧去抖动与 frameHash 快速路径冲突：首次识别 _stable=1 不更新，后续帧哈希相同直接跳过，
     //      导致答案永远不更新 →「四个选项识别」不工作。frameHash 已保证题目锁定，无需二次去抖动。）
     if(match.index>=0){
       state.lastIconHash=String(match.index);
-      // 关键修复：匹配置信度不足时「不确认答案」——只显示识别结果作参考，不框选，避免低置信度误框。
-      // 权重调整后（0.75rgb+0.25hue）正确匹配约 0.4~0.7，框偏乱码 < 0.1。
-      // 确认答案需 score >= CONFIRM_SCORE 且与次高候选差距明显（margin）。
-      const CONFIRM_SCORE = 0.35;
-      const margin = match.secondScore!=null ? (match.score-match.secondScore) : 0;
-      if(match.score >= CONFIRM_SCORE && margin >= 0.08){
-        const ans=findAnswer(texts,match.name); state.lastAnswer=ans.index>=0?ans.index+1:null;
-        renderOptions(ans.details,match.name,ans.index); $('ocr-status').textContent=state.lastAnswer?('已识别：选项 '+state.lastAnswer):'未找到匹配选项';
-      } else {
+      // 交叉核对（用户核心要求）：「识别结果」必须落在「四个选项识别」里。
+      // matchIcon 已硬约束只在这 4 个候选里匹配，结果必在其中；此处再兜底校验，若异常则忽略。
+      if(!names.includes(match.name)){
         state.lastAnswer=null;
-        // 仍显示选项 OCR 结果（供参考），但不框选答案（hitIndex=-1）
-        const ansRef=findAnswer(texts,match.name);
-        renderOptions(ansRef.details,match.name,-1);
-        $('ocr-status').textContent='识别结果「'+match.name+'」置信度偏低（'+Math.round((match.score+1)/2*100)+'%），未框选答案，请点「更新位置」校准图标框';
+        renderOptions([],match.name,-1);
+        $('ocr-status').textContent='识别异常：「'+match.name+'」不在选项中，已忽略（请点「更新位置」）';
+      } else {
+        // 一致的红框：识别结果已确认（score ≥ 下限）就框选答案，不再出现「有结果却无红框」的割裂状态
+        const ans=findAnswer(texts,match.name); state.lastAnswer=ans.index>=0?ans.index+1:null;
+        renderOptions(ans.details,match.name,ans.index);
+        $('ocr-status').textContent=state.lastAnswer?('已识别：选项 '+state.lastAnswer):('识别结果「'+match.name+'」，请点「更新位置」校准选项框');
       }
     }
-    else{ state.lastAnswer=null; $('ocr-status').textContent='未匹配到图标，请调整图标区域（可点「更新位置」自动校准）'; }
+    else{ state.lastAnswer=null; $('ocr-status').textContent='未识别到图标（选项 OCR '+(names.filter(Boolean).length)+' 个），请点「更新位置」校准'; }
   }catch(e){ $('ocr-status').textContent='识别出错：'+(e&&e.message?e.message:e); }
   finally{ state.recognizing=false; }
 }
