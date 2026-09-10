@@ -703,21 +703,29 @@ async function matchIcon(crop, indices){
   // 深色占比（一次性计算，O(1)）：蓝色剧情技能靠深色形状区分（变化之术深色方形占比高、仙灵店铺左上角浅蓝占比低），
   // 暗绿门派技能同理（水遁 vs 纵地金光深色占比也有差异）。深色占比是快速、确定性的形状特征。
   const cropFill = darkFillOfCrop(work);
+  // 易混暗绿技能组：宁心/鹰击/佛法无边 游戏渲染后主体颜色几乎相同，normal RGB NCC 区分度不足，
+  // 但深色线条形状不同，深色增强匹配能稳定区分。
+  // 关键：在主循环内一次性融合（不再「先 normal 出结果、再二次识别改结果」），消除「答案跳转」——
+  // 用户看到的是一次性确定的结果，且跨帧稳定。
+  const DARK_AMBIGUOUS = new Set(['宁心','鹰击','佛法无边']);
+  const hasAmbiguous = list.some(i => DARK_AMBIGUOUS.has(bank[i].name));
   let bestIdx=-1,bestScore=-2,secondScore=-2;
   for(const i of list){
     let sc = await slideMatch(work, bank[i].icon);
-    // 一次性融合深色占比（不再二次跳转）：蓝/暗绿技能用深色形状辅助区分。
-    // 关键改进：旧逻辑先 normal 出结果、再二次识别改结果，用户看到结果「跳转」；
-    // 现改为单次决策、跨帧稳定，且去掉 slideMatchDark（多尺度滑窗，最慢的部分）大幅提速。
     const col = bank[i].color;
     // 深色占比 fillMatch 只对「蓝色剧情技能」生效。
-    // 关键修复：暗绿色门派技能（水遁/纵地金光等）游戏渲染后深色占比与模板偏差大
-    // （实测 66.png cropFill=0.369 vs 水遁模板 0.45，而纵地金光模板 0.39 反而更接近），
+    // 关键修复：暗绿色门派技能（水遁/纵地金光等）游戏渲染后深色占比与模板偏差大，
     // fillMatch 会把错误候选抬到 top1（帮倒忙）。暗绿技能靠 slideMatch 本身已能区分。
     if(col==='蓝色'){
       const tplFill = state.templates[i].darkFill || 0;
       const fillMatch = 1 - Math.min(1, Math.abs(cropFill - tplFill)/0.15);
       sc = 0.75*sc + 0.25*fillMatch;
+    }
+    // 深色增强融合：仅当候选含易混组成员时，对组内成员额外算 dark 并融合（0.5 normal + 0.5 dark）。
+    // 实测 84.png 佛法无边：0.5*0.461+0.5*0.461=0.461 第一，宁心 0.424/鹰击 0.418，margin 0.037（原 normal 仅 0.01）。
+    if(hasAmbiguous && DARK_AMBIGUOUS.has(bank[i].name)){
+      const dk = await slideMatchDark(work, bank[i].icon);
+      if(dk > -1){ sc = 0.5*sc + 0.5*dk; }
     }
     if(sc>bestScore){ secondScore=bestScore; bestScore=sc; bestIdx=i; }
     else if(sc>secondScore) secondScore=sc;
@@ -725,20 +733,6 @@ async function matchIcon(crop, indices){
   // 置信度下限：分数过低说明框没对准图标（背景/乱码），判定「未匹配」，不输出结果
   const MIN_SCORE = 0.20;
   if(bestIdx<0 || bestScore<MIN_SCORE) return {index:-1,name:'',category:'',color:'',score:bestScore,secondScore};
-  // 易混暗绿技能组二次匹配：宁心/鹰击/佛法无边 游戏渲染后主体颜色几乎相同（都是暗绿），
-  // normal RGB NCC 区分度不足（84.png 佛法无边 normal 0.461 排第三、误判宁心 0.471）。
-  // 但三者「深色线条形状」不同，深色增强匹配能稳定区分（实测佛法无边 0.461 vs 宁心 0.378/鹰击 0.373）。
-  // 仅当 top1 属于该组时才触发（确定性决策、跨帧稳定、不跳转），且只对组内候选做深色增强（最多 3 个，快）。
-  const DARK_AMBIGUOUS = new Set(['宁心','鹰击','佛法无边']);
-  if(DARK_AMBIGUOUS.has(bank[bestIdx].name)){
-    let dBest=-1, dScore=-2;
-    for(const i of list){
-      if(!DARK_AMBIGUOUS.has(bank[i].name)) continue;
-      const dk = await slideMatchDark(work, bank[i].icon);
-      if(dk>dScore){ dScore=dk; dBest=i; }
-    }
-    if(dBest>=0){ bestIdx=dBest; bestScore=dScore; }
-  }
   return {index:bestIdx,name:bank[bestIdx].name,category:bank[bestIdx].category,color:bank[bestIdx].color,score:bestScore,secondScore};
 }
 /* 计算 crop 的 HSV 色相直方图（16 bins，只用有颜色像素），与模板预计算的 hueHist 做相关 */
