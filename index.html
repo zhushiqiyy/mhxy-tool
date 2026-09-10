@@ -571,18 +571,31 @@ function loadIconImage(src){
     img.src=src;
   });
 }
-async function slideMatch(crop, iconDataUrl){
+/* 滑窗匹配：一次遍历同时计算「normal RGB NCC」和「深色增强 NCC」。
+   深色增强 = 深色灰度 max(0,128-lum) 的 masked NCC，比较图标深色线条/形状的空间分布。
+   wD（dark 权重）由调用方按候选颜色决定：深色系（暗绿/蓝）传 0.4，亮色系（黄/亮绿）传 0。
+   深色增强只对深色系候选生效——深色系图标（暗绿/蓝，占 91%）主体颜色相近、靠深色线条区分；
+   亮色系图标深色元素少，dark 会偏袒深色元素多的候选（实测健身术黄色组被暗器技巧反超），故亮色纯 normal。
+   关键：normal 与 dark 合并到同一遍历（替代原来 slideMatch + slideMatchDark 两次滑窗），且 wD=0 时
+   完全跳过 dark 计算，速度不降反升。尺度覆盖模板全谱 0.75~1.8，全框搜索（平移不变），一次性决策不跳转。 */
+async function slideMatch(crop, iconDataUrl, wD){
+  wD = wD || 0;
   const img=await loadIconImage(iconDataUrl);
   const iw=img?img.naturalWidth:0, ih=img?img.naturalHeight:0;
   if(!iw||!ih) return -2;
   const cw=crop.width, ch=crop.height;
   if(cw<8||ch<8) return -2;
   const cdata=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,cw,ch).data;
+  // crop 深色灰度（仅 wD>0 时算）
+  let cgray=null;
+  if(wD>0){
+    cgray=new Float32Array(cw*ch);
+    for(let i=0;i<cw*ch;i++){
+      const lum=0.299*cdata[i*4]+0.587*cdata[i*4+1]+0.114*cdata[i*4+2];
+      cgray[i]=Math.max(0, 128-lum);
+    }
+  }
   let best=-2;
-  // 关键修复：尺度范围必须覆盖模板尺寸的全谱。模板尺寸 38~72px，游戏渲染大图标固定约 58px，
-  // 故 scale = 58/模板尺寸 约 0.8~1.5。旧尺度 [1.2,1.6,2.0,2.4] 只覆盖 scale>1.2，
-  // 大模板（如「一斧开天」72×72 需 scale 0.8）永远匹配不到，导致其识别一直错。
-  // 新尺度 [0.75,0.9,1.05,1.2,1.4,1.6,1.8] 覆盖 0.75~1.8。
   const scales=[0.75,0.9,1.05,1.2,1.4,1.6,1.8];
   for(const s of scales){
     const tw=Math.max(4,Math.round(iw*s)), th=Math.max(4,Math.round(ih*s));
@@ -591,104 +604,47 @@ async function slideMatch(crop, iconDataUrl){
     const tg=tc.getContext('2d'); tg.drawImage(img,0,0,tw,th);
     const td=tg.getImageData(0,0,tw,th).data;
     const N=tw*th;
+    // normal 模板：RGB 均值 + 归一化（不 mask）
     let tm=0; for(let i=0;i<N;i++){ tm+=td[i*4]+td[i*4+1]+td[i*4+2]; } tm/=N*3;
     const tv=new Float32Array(N*3); let tn=0;
     for(let i=0;i<N;i++){ for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; } }
     tn=Math.sqrt(tn);
-    // 关键修复：全框搜索（而非中央 ±30%）。图标可能在框内任意位置（不超出边界），
-    // 中央搜索会漏掉靠边的图标 → 同一图标位置略变就得到不同结果（79/80、81/82 现象）。
-    // 全框搜索是平移不变的，图标在框内任何位置结果一致。
-    const xLo=0, xHi=cw-tw;
-    const yLo=0, yHi=ch-th;
-    const step=2;
-    for(let y=yLo;y+th<=ch && y<=yHi;y+=step){ for(let x=xLo;x+tw<=cw && x<=xHi;x+=step){
-      let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; sm+=cdata[idx]+cdata[idx+1]+cdata[idx+2]; } sm/=N*3;
-      let cov=0,sn=0;
-      for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; for(let k=0;k<3;k++){ const sv=cdata[idx+k]-sm; cov+=sv*tv[(j*tw+i)*3+k]; sn+=sv*sv; } }
-      const sc=(sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):0;
-      if(sc>best) best=sc;
-    }}
-  }
-  return best;
-}
-/* 深色增强滑窗匹配：把 crop 和模板都转成「深色灰度 = max(0, 128-lum)」（越暗的像素值越大、亮色归零），
-   只比较深色元素/线条的形状空间分布。模板用 alpha mask 排除透明背景（透明黑 RGB 0,0,0 经 128-lum 会变成 128，
-   被误判成「最强深色信号」）。用于区分「宁心/鹰击/佛法无边」这类游戏渲染后主体颜色几乎相同、但深色线条不同的暗绿技能。 */
-async function slideMatchDark(crop, iconDataUrl){
-  const img=await loadIconImage(iconDataUrl);
-  const iw=img?img.naturalWidth:0, ih=img?img.naturalHeight:0;
-  if(!iw||!ih) return -2;
-  const cw=crop.width, ch=crop.height;
-  if(cw<8||ch<8) return -2;
-  const cdata=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,cw,ch).data;
-  // crop 深色灰度（单通道）
-  const cgray=new Float32Array(cw*ch);
-  for(let i=0;i<cw*ch;i++){
-    const lum=0.299*cdata[i*4]+0.587*cdata[i*4+1]+0.114*cdata[i*4+2];
-    cgray[i]=Math.max(0, 128-lum);
-  }
-  let best=-2;
-  const scales=[0.75,0.9,1.05,1.2,1.4,1.6,1.8];
-  for(const s of scales){
-    const tw=Math.max(4,Math.round(iw*s)), th=Math.max(4,Math.round(ih*s));
-    if(tw>cw || th>ch) continue;
-    const tc=document.createElement('canvas'); tc.width=tw; tc.height=th;
-    const tg=tc.getContext('2d'); tg.drawImage(img,0,0,tw,th);
-    const td=tg.getImageData(0,0,tw,th).data;
-    const N=tw*th;
-    const tmask=new Uint8Array(N); const tval=new Float32Array(N);
-    let mn=0;
-    for(let i=0;i<N;i++){
-      if(td[i*4+3]>40){
-        const lum=0.299*td[i*4]+0.587*td[i*4+1]+0.114*td[i*4+2];
-        tval[i]=Math.max(0, 128-lum);
-        tmask[i]=1; mn++;
+    // dark 模板（仅 wD>0）：alpha mask + 深色灰度 + 归一化
+    let tmask=null, dnv=null, mn=0, dtn=0;
+    if(wD>0){
+      tmask=new Uint8Array(N); const tdv=new Float32Array(N);
+      for(let i=0;i<N;i++){
+        if(td[i*4+3]>40){
+          const lum=0.299*td[i*4]+0.587*td[i*4+1]+0.114*td[i*4+2];
+          tdv[i]=Math.max(0, 128-lum);
+          tmask[i]=1; mn++;
+        }
       }
+      let dtm=0; for(let i=0;i<N;i++){ if(tmask[i]) dtm+=tdv[i]; } dtm=(mn>0)?(dtm/mn):0;
+      dnv=new Float32Array(N);
+      for(let i=0;i<N;i++){ if(tmask[i]){ const v=tdv[i]-dtm; dnv[i]=v; dtn+=v*v; } }
+      dtn=Math.sqrt(dtn);
     }
-    if(mn<20) continue;
-    let tm=0; for(let i=0;i<N;i++){ if(tmask[i]) tm+=tval[i]; } tm/=mn;
-    const tv=new Float32Array(N); let tn=0;
-    for(let i=0;i<N;i++){ if(tmask[i]){ const v=tval[i]-tm; tv[i]=v; tn+=v*v; } }
-    tn=Math.sqrt(tn);
     const step=2;
     for(let y=0;y+th<=ch;y+=step){ for(let x=0;x+tw<=cw;x+=step){
-      let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]) sm+=cgray[(y+j)*cw+(x+i)]; } sm/=mn;
-      let cov=0,sn=0;
-      for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]){ const sv=cgray[(y+j)*cw+(x+i)]-sm; cov+=sv*tv[j*tw+i]; sn+=sv*sv; } }
-      const sc=(sn>1e-6&&tn>0)?cov/(Math.sqrt(sn)*tn):0;
+      // normal NCC（RGB，不 mask）
+      let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; sm+=cdata[idx]+cdata[idx+1]+cdata[idx+2]; } sm/=N*3;
+      let covN=0,snN=0;
+      for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; for(let k=0;k<3;k++){ const sv=cdata[idx+k]-sm; covN+=sv*tv[(j*tw+i)*3+k]; snN+=sv*sv; } }
+      const nccN=(snN>1e-6&&tn>0)?covN/(Math.sqrt(snN)*tn):0;
+      let sc=nccN;
+      // dark NCC（深色灰度，alpha mask）——仅 wD>0
+      if(wD>0){
+        let dsm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]) dsm+=cgray[(y+j)*cw+(x+i)]; } dsm=(mn>0)?(dsm/mn):0;
+        let covD=0,snD=0;
+        for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]){ const sv=cgray[(y+j)*cw+(x+i)]-dsm; covD+=sv*dnv[j*tw+i]; snD+=sv*sv; } }
+        const nccD=(snD>1e-6&&dtn>0)?covD/(Math.sqrt(snD)*dtn):0;
+        sc=(1-wD)*nccN+wD*nccD;
+      }
       if(sc>best) best=sc;
     }}
   }
   return best;
-}
-/* 计算 crop 内「前景的深色占比」：与模板 darkFill 同口径（前景=非背景非蓝框，深色=lum<80）。
-   用于区分蓝色剧情技能的深色形状差异（变化之术深色方形占比高、仙灵店铺左上角浅蓝占比低）。 */
-function darkFillOfCrop(crop){
-  const w=crop.width, h=crop.height;
-  if(w<8||h<8) return 0;
-  const d=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,w,h).data;
-  const isBluePx=(r,g,b)=>(b>100 && b>r*1.35 && b>g*1.15); // 工具蓝框，排除
-  // 关键修复：背景用「边框环非蓝像素的中位数」，而非四角均值。
-  // 图标在框内轻微移动时，四角内容可能变（图标触角/接近角），导致背景估计漂移 → 深色占比漂移 → 蓝色技能结果跳变（79/80）。
-  // 边框环（整圈外缘）中位数对图标位置不敏感，是平移不变的背景估计。
-  const ringR=[],ringG=[],ringB=[];
-  for(let x=0;x<w;x++){ add(x,0); add(x,h-1); }
-  for(let y=1;y<h-1;y++){ add(0,y); add(w-1,y); }
-  function add(x,y){ const i=(y*w+x)*4; const r=d[i],g=d[i+1],b=d[i+2]; if(!isBluePx(r,g,b)){ ringR.push(r); ringG.push(g); ringB.push(b); } }
-  if(ringR.length<8) return 0;
-  const med=a=>{ a.sort((p,q)=>p-q); return a[a.length>>1]; };
-  const br=med(ringR), bg=med(ringG), bb=med(ringB);
-  let fg=0, dark=0;
-  for(let i=0;i<w*h;i++){
-    const r=d[i*4], g=d[i*4+1], b=d[i*4+2];
-    if(isBluePx(r,g,b)) continue;
-    const diff=Math.abs(r-br)+Math.abs(g-bg)+Math.abs(b-bb);
-    if(diff>28){
-      fg++;
-      if(0.299*r+0.587*g+0.114*b < 80) dark++;
-    }
-  }
-  return fg>20 ? dark/fg : 0;
 }
 async function matchIcon(crop, indices){
   // 小图标先放大到 96px（整个屏幕共享时大图标仅 40-56px，放大给匹配更多像素、提升区分度与稳定性）
@@ -700,33 +656,16 @@ async function matchIcon(crop, indices){
   }
   // 只在这些候选里匹配（四个选项）；调用方保证 indices 非空，此处仍做兜底
   const list = indices && indices.length ? indices : state.templates.map((_,i)=>i);
-  // 深色占比（一次性计算，O(1)）：蓝色剧情技能靠深色形状区分（变化之术深色方形占比高、仙灵店铺左上角浅蓝占比低），
-  // 暗绿门派技能同理（水遁 vs 纵地金光深色占比也有差异）。深色占比是快速、确定性的形状特征。
-  const cropFill = darkFillOfCrop(work);
-  // 易混暗绿技能组：宁心/鹰击/佛法无边 游戏渲染后主体颜色几乎相同，normal RGB NCC 区分度不足，
-  // 但深色线条形状不同，深色增强匹配能稳定区分。
-  // 关键：在主循环内一次性融合（不再「先 normal 出结果、再二次识别改结果」），消除「答案跳转」——
-  // 用户看到的是一次性确定的结果，且跨帧稳定。
-  const DARK_AMBIGUOUS = new Set(['宁心','鹰击','佛法无边']);
-  const hasAmbiguous = list.some(i => DARK_AMBIGUOUS.has(bank[i].name));
+  // 深色增强只对「深色系」候选（暗绿/蓝，占 91%）生效；亮色系（黄/亮绿）纯 normal。
+  // 深色系图标主体颜色相近、靠深色线条区分，dark 有效；亮色系深色元素少，dark 会偏袒深色元素多的候选
+  // （实测 71 健身术黄色组：dark 让暗器技巧反超健身术），故亮色不融合 dark。
+  const isDarkCol = c => (c==='暗绿色' || c==='蓝色');
+  const needDark = list.some(i => isDarkCol(bank[i].color));
   let bestIdx=-1,bestScore=-2,secondScore=-2;
   for(const i of list){
-    let sc = await slideMatch(work, bank[i].icon);
-    const col = bank[i].color;
-    // 深色占比 fillMatch 只对「蓝色剧情技能」生效。
-    // 关键修复：暗绿色门派技能（水遁/纵地金光等）游戏渲染后深色占比与模板偏差大，
-    // fillMatch 会把错误候选抬到 top1（帮倒忙）。暗绿技能靠 slideMatch 本身已能区分。
-    if(col==='蓝色'){
-      const tplFill = state.templates[i].darkFill || 0;
-      const fillMatch = 1 - Math.min(1, Math.abs(cropFill - tplFill)/0.15);
-      sc = 0.75*sc + 0.25*fillMatch;
-    }
-    // 深色增强融合：仅当候选含易混组成员时，对组内成员额外算 dark 并融合（0.5 normal + 0.5 dark）。
-    // 实测 84.png 佛法无边：0.5*0.461+0.5*0.461=0.461 第一，宁心 0.424/鹰击 0.418，margin 0.037（原 normal 仅 0.01）。
-    if(hasAmbiguous && DARK_AMBIGUOUS.has(bank[i].name)){
-      const dk = await slideMatchDark(work, bank[i].icon);
-      if(dk > -1){ sc = 0.5*sc + 0.5*dk; }
-    }
+    const wD = (needDark && isDarkCol(bank[i].color)) ? 0.4 : 0;
+    // slideMatch 一次遍历同时算 normal + dark，按 wD 融合（wD=0 时纯 normal 且跳过 dark 计算）。
+    const sc = await slideMatch(work, bank[i].icon, wD);
     if(sc>bestScore){ secondScore=bestScore; bestScore=sc; bestIdx=i; }
     else if(sc>secondScore) secondScore=sc;
   }
