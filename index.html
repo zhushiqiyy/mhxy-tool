@@ -257,6 +257,7 @@ const state = {
     _refineTick:0,        // refineIcons 降频计数（每 2 轮做一次全分辨率精修）
     _hasMapVote:null,     // 宝图数量时间平滑投票 {key,count}：连续 2 轮检测一致才更新 hasMap
     _gridHash:null,       // 网格区域帧哈希：画面不变（不操作）就跳过图标检测+网格外推，锁定识别结果（根治「宝图一直飘」）
+    _noIconCount:0,       // 连续无图标轮数：图标数=0 连续多轮才判「背包关闭」（区分「背包关闭」与「背包打开但没宝图」）
     ready:false,          // 藏宝图资源（宝图图标等）是否加载完成；未完成前 baotuLoop 不运行
   }
 };
@@ -1043,7 +1044,10 @@ function downsampleData(frame, scale){
 }
 function autoLocateGrid(frame){
   const found = findIconPositions(frame);
-  if(found.positions.length){ state.bt.iconPositions=found.positions; state.bt.iconWActual=found.iconW; state.bt.iconHActual=found.iconH; }
+  // 关键修复：总是更新 iconPositions（包括空数组）。旧逻辑只在有图标时才更新，
+  // 导致图标数=0（背包关闭）时 iconPositions 残留旧值，baotuLoop 的「连续无图标」清空逻辑永不触发。
+  state.bt.iconPositions = found.positions;
+  if(found.positions.length){ state.bt.iconWActual=found.iconW; state.bt.iconHActual=found.iconH; }
   let g = inferGrid(found, frame);
   if(!g) return state.bt.grid;  // 定位失败（图标太少），保持旧网格
   if(state.bt.grid){
@@ -1238,7 +1242,10 @@ function findEvenLines(lines, gap){
 }
 function inferGrid(found, frame){
   const {positions, iconW, iconH} = found;
-  if(!positions.length) return null;
+  // 至少 2 个图标才能确定格子间距（bestGap 需要 ≥2 列/行）。1 个图标无法算间距，
+  // 且很可能是游戏其他 UI 的误检（图030：任务面板附近 1 个高分误检图标，会把网格定位到错误位置）。
+  // 低于 2 个图标时返回 null，由 baotuLoop 提示「未检测到宝图」而非「未检测到背包格子」。
+  if(positions.length < 2) return null;
   const cx = positions.map(p=>p.x+iconW/2).sort((a,b)=>a-b);
   const cy = positions.map(p=>p.y+iconH/2).sort((a,b)=>a-b);
   // 聚类为不同列/行，再求格子间距。格子间距独立于图标尺寸（「道具行囊」等标签页格子远大于图标，比例可到 2 以上）
@@ -1626,13 +1633,18 @@ async function baotuLoop(){
         g=autoLocateGrid(frame);
         if(g && g.w>40 && g.h>40){ state.bt.grid=g; }
       }
-      // 背包关闭检测：图标数骤降（<2）说明背包已关闭。仅无 tooltip 时判断（tooltip 遮挡也会让图标数骤降，会误判关闭）
-      if(state.bt.iconPositions.length < 2){
-        if(state.bt.grid){ state.bt.grid=null; state.bt._gridHash=null; state.bt.hasMap.fill(false); renderBtGrid(); }
-        $('bt-status').textContent='未检测到背包格子，请打开背包/道具行囊';
-        return;
+      // 背包关闭检测：仅当「图标数=0 且连续多轮」才清空网格。
+      // 关键修复（图030）：旧逻辑用「图标数<2」判背包关闭，但「背包打开而没宝图」是合法状态
+      // （道具标签页没有宝图、或行囊被清空），会误报「未检测到背包格子」。改为连续多轮无图标才清空。
+      if(state.bt.iconPositions.length === 0){
+        state.bt._noIconCount++;
+        if(state.bt._noIconCount >= 5 && state.bt.grid){
+          state.bt.grid=null; state.bt._gridHash=null; state.bt.hasMap.fill(false); renderBtGrid();
+        }
+      } else {
+        state.bt._noIconCount = 0;
       }
-      if(!state.bt.grid){ $('bt-status').textContent='未定位到背包格子（视频 '+frame.width+'x'+frame.height+'）'; return; }
+      if(!state.bt.grid){ $('bt-status').textContent='未检测到宝图，请确认已打开「行囊」标签页'; return; }
       // 检测宝图（仅画面变化时重检测；画面不变沿用上次结果）
       if(!hashSame){
         const det=detectMaps(frame);
