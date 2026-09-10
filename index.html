@@ -1187,6 +1187,55 @@ function nmsMatches(matches, dx, dy){
   for(const m of matches){ if(kept.some(k=>Math.abs(k.x-m.x)<dx&&Math.abs(k.y-m.y)<dy)) continue; kept.push(m); }
   return kept;
 }
+/* 检测蓝灰边框线（背包格子的斜面边框亮色边，RGB 83,99,136 = BGR 136,99,83）。
+   这是确定网格绝对位置的可靠锚点：背包 4×5 格子结构固定，边框线永远存在，与宝图如何分布无关。
+   图标外推「最左图标−半格」隐含「宝图覆盖第0列/第0行」的错误假设，宝图随机分布时网格系统性偏移。
+   只在 region（图标框定的背包附近区域）内全分辨率扫描，避免游戏其他 UI 蓝灰元素干扰。
+   关键：getImageData 是 RGBA，比较 BGR 颜色值务必 data[i+2]=B、data[i+1]=G、data[i]=R。 */
+function detectBorder(frame, region){
+  const x0=Math.max(0,Math.round(region.x0)), y0=Math.max(0,Math.round(region.y0));
+  const x1=Math.min(frame.width,Math.round(region.x1)), y1=Math.min(frame.height,Math.round(region.y1));
+  const W=x1-x0, H=y1-y0;
+  if(W<30||H<30) return {vlines:[], hlines:[]};
+  const d=frame.getContext('2d',{willReadFrequently:true}).getImageData(x0,y0,W,H).data;
+  const colcnt=new Float32Array(W).fill(0), rowcnt=new Float32Array(H).fill(0);
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const i=(y*W+x)*4;
+    const r=d[i], g=d[i+1], b=d[i+2]; // RGBA
+    // 蓝灰 BGR(136,99,83)：B≈136、G≈99、R≈83（容差 22，实测最干净；紫色边框杂乱不可用）
+    if(Math.abs(b-136)<22 && Math.abs(g-99)<22 && Math.abs(r-83)<22){ colcnt[x]++; rowcnt[y]++; }
+  }
+  return { vlines:extractLines(colcnt).map(v=>Math.round(v+x0)), hlines:extractLines(rowcnt).map(h=>Math.round(h+y0)) };
+}
+/* 从列/行计数中提取峰值（= 边框线位置）。自适应阈值（最高峰的 40%），能过滤散乱噪声 */
+function extractLines(cnt){
+  const n=cnt.length;
+  const sm=new Float32Array(n);
+  for(let i=0;i<n;i++){ sm[i]=(cnt[Math.max(0,i-1)]+cnt[i]+cnt[Math.min(n-1,i+1)])/3; }
+  let mx=0; for(let i=0;i<n;i++) if(sm[i]>mx) mx=sm[i];
+  if(mx<6) return [];
+  const th=Math.max(5, mx*0.4);
+  const peaks=[]; let i=0;
+  while(i<n){
+    if(sm[i]>th){ let j=i; while(j<n&&sm[j]>th) j++; let pk=i; for(let k=i;k<j;k++) if(sm[k]>sm[pk]) pk=k; peaks.push(pk); i=j; }
+    else i++;
+  }
+  const merged=[];
+  for(const p of peaks){ if(merged.length&&p-merged[merged.length-1]<5){ merged[merged.length-1]=Math.round((merged[merged.length-1]+p)/2); } else merged.push(p); }
+  return merged;
+}
+/* 从检测到的线中找「最长等间距序列」（间距≈gap），排除面板边缘等非网格噪声 */
+function findEvenLines(lines, gap){
+  lines=[...lines].sort((a,b)=>a-b);
+  let best=[];
+  const tol=Math.max(4, Math.round(gap*0.15));
+  for(let i=0;i<lines.length;i++){
+    const grp=[lines[i]]; let cur=lines[i];
+    for(let j=i+1;j<lines.length;j++){ if(Math.abs(lines[j]-cur-gap)<=tol){ grp.push(lines[j]); cur=lines[j]; } }
+    if(grp.length>best.length) best=grp;
+  }
+  return best;
+}
 function inferGrid(found, frame){
   const {positions, iconW, iconH} = found;
   if(!positions.length) return null;
@@ -1200,14 +1249,28 @@ function inferGrid(found, frame){
   if(!gx) gx=iconW*102/98;
   if(!gy || Math.abs(gy-gx)>gx*0.4) gy=gx;
 
-  // 主方案：外推（最左/最上图标中心 − 0.5*gx 作为网格原点）。
-  // 简单可靠，稀疏图标/缺列时也不偏移。旧的 consensus 在缺列时会把最左图标误判为第2/3列，
-  // 导致网格整体左移。外推的前提是「最左图标在网格第1列附近」，背包场景下宝图通常分布到多列，最左图标≈第1列，满足。
-  // 帧间跳变（漏检第1列）由 autoLocateGrid 的网格平滑抑制，这里不再做边框校正——
-  // 蓝灰边框线在低分辨率整个屏幕共享下会失效（1-2px 线被压缩后不可见），调用 detectBorder 只会徒增开销。
-  const left = Math.min(...cx) - gx/2;
-  const top = Math.min(...cy) - gy/2;
-  return {x:Math.round(left), y:Math.round(top), w:Math.round(gx*5), h:Math.round(gy*4)};
+  // 图标外推（兜底）：最左/最上图标中心 − 半格。仅在蓝灰线不可用时才用。
+  const iconLeft = Math.min(...cx) - gx/2;
+  const iconTop = Math.min(...cy) - gy/2;
+
+  // 主方案：蓝灰边框线锚点确定格子 0 的绝对左上角。
+  // 蓝灰竖线序列最左一条 = 格子0左边界，横线序列最上一条 = 格子0顶边界（此前实测满背包 x=789、单行 x=782 均精确）。
+  if(frame){
+    const minX=Math.min(...positions.map(p=>p.x)), maxX=Math.max(...positions.map(p=>p.x+iconW));
+    const minY=Math.min(...positions.map(p=>p.y)), maxY=Math.max(...positions.map(p=>p.y+iconH));
+    const region={ x0:minX-gx*2, y0:minY-gy*2, x1:maxX+gx*2, y1:maxY+gy*2 };
+    const border=detectBorder(frame, region);
+    const bv=findEvenLines(border.vlines, gx);
+    const bh=findEvenLines(border.hlines, gy);
+    if(bv.length>=2 && bh.length>=2){
+      const left=bv[0], top=bh[0];
+      // sanity：与图标外推差 < gx*3（能容纳宝图从第0列到第3列任一起点，同时防背包外 UI 误检）
+      if(Math.abs(left-iconLeft)<gx*3 && Math.abs(top-iconTop)<gy*3){
+        return {x:Math.round(left), y:Math.round(top), w:Math.round(gx*5), h:Math.round(gy*4)};
+      }
+    }
+  }
+  return {x:Math.round(iconLeft), y:Math.round(iconTop), w:Math.round(gx*5), h:Math.round(gy*4)};
 }
 function cluster1d(vals, tol){ const arr=[]; for(const v of vals){ if(arr.length&&v-arr[arr.length-1]<=tol){ arr[arr.length-1]=(arr[arr.length-1]+v)/2; } else arr.push(v); } return arr; }
 function medianGap(vals){ if(vals.length<2) return null; const gaps=[]; for(let i=1;i<vals.length;i++) gaps.push(vals[i]-vals[i-1]); gaps.sort((a,b)=>a-b); return gaps[Math.floor(gaps.length/2)]; }
@@ -1243,6 +1306,35 @@ function detectMaps(frame){
     const idx=r*5+c; if(!hasMap[idx]){ hasMap[idx]=true; cnt++; }
   }
   return {hasMap, cnt};
+}
+/* 检测「被悬停格子」的暖白高亮边框。鼠标悬停宝图时，该格边框变暖白 RGB(255,248,237)，
+   正常格子边框是蓝灰 RGB(184,178,216)（b 最大）或深色，均不满足 r>b。暖白判据 r>235 && g>225 && b>215 && r>b+8。
+   这是比「坐标行 bbox 反推」更可靠的被悬停格子信号——高亮直接标在格子上，无 tooltip 偏移问题。
+   实测图029：被悬停列2 外缘 316 个暖白像素，其他列仅 2 个，区分度极高。 */
+function detectHighlight(frame){
+  const g=state.bt.grid; if(!g) return -1;
+  const cw=g.w/5, ch=g.h/4;
+  const x0=Math.max(0,Math.round(g.x-2)), y0=Math.max(0,Math.round(g.y-2));
+  const W=Math.min(frame.width, Math.round(g.x+g.w+2))-x0;
+  const H=Math.min(frame.height, Math.round(g.y+g.h+2))-y0;
+  if(W<20||H<15) return -1;
+  const d=frame.getContext('2d',{willReadFrequently:true}).getImageData(x0,y0,W,H).data;
+  const cellVote=new Array(20).fill(0);
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const i=(y*W+x)*4; const r=d[i], gg=d[i+1], b=d[i+2];
+    if(r>235 && gg>225 && b>215 && r>b+8){
+      const c=Math.floor((x0+x-g.x)/cw), rr=Math.floor((y0+y-g.y)/ch);
+      if(rr>=0&&rr<4&&c>=0&&c<5) cellVote[rr*5+c]++;
+    }
+  }
+  let bestIdx=-1, bestCnt=0, secondCnt=0;
+  for(let i=0;i<20;i++){
+    if(cellVote[i]>bestCnt){ secondCnt=bestCnt; bestCnt=cellVote[i]; bestIdx=i; }
+    else if(cellVote[i]>secondCnt) secondCnt=cellVote[i];
+  }
+  // 高亮格子需明显高于其他（单格约 100-300 像素，其他 <10）
+  if(bestCnt<30 || bestCnt<secondCnt*3) return -1;
+  return bestIdx;
 }
 function matchTemplate(frame, tplImg, tplW, tplH, useMask, scale, step, minScore, tplScale, region){
   tplScale = tplScale || 1;
@@ -1438,31 +1530,27 @@ async function readCoordinate(frame){
   const h=Math.min(frame.height-y0, Math.round(g.h*3.0));
   return await readFromRegion(frame, x0, y0, w, h);
 }
-/* 坐标行 bbox 左上角 (minX,minY) → 反推被悬停宝图格子：tooltip 出现在被悬停格子右下方。
-   两阶段映射：①minX 定列（坐标行左边缘最接近的格子列）；②minY 定行（该列中有宝图、且在坐标行上方、y 最大的格子）。
-   实测图021/图022：minX→第1列、minY→第3行，正确映射到第3行第1列。 */
+/* 坐标行 bbox 左上角 (minX,minY) → 反推被悬停宝图格子（兜底，仅在 detectHighlight 未检测到高亮时用）。
+   tooltip 出现在被悬停宝图右下方，故被悬停宝图 = 坐标行左上角「左上方」最近的宝图。
+   关键修复：旧逻辑用 minX 定列——但坐标行在 tooltip 内偏右（tooltip 整体在被悬停宝图右侧），
+   minX 会映射到被悬停宝图右侧的列（实测图029 minX=749 映射到列3，实际被悬停是列2）。 */
 function coordToCell(minX, minY){
   const g=state.bt.grid; if(!g) return -1;
-  const cw=g.w/5, ch=g.h/4;
-  // ① 列：坐标行左边缘 minX 最接近的格子列
-  let col=-1, bestD=Infinity;
-  for(let c=0;c<5;c++){
-    const colCx=g.x + c*cw + cw/2;
-    const d=Math.abs(colCx - minX);
-    if(d<bestD){ bestD=d; col=c; }
-  }
-  // ② 行：该列中有宝图、在坐标行上方（pcy<minY）、y 最大的格子
-  let row=-1, bestY=-Infinity;
+  let bestIdx=-1, bestScore=Infinity;
   for(let i=0;i<state.bt.iconPositions.length;i++){
     const p=state.bt.iconPositions[i];
     const pcx=p.x + state.bt.iconWActual/2, pcy=p.y + state.bt.iconHActual/2;
-    const c=Math.floor((pcx-g.x)/cw);
-    if(c!==col) continue;
-    if(pcy>=minY) continue;
-    if(pcy>bestY){ bestY=pcy; row=Math.floor((pcy-g.y)/ch); }
+    if(pcx >= minX || pcy >= minY) continue; // 必须在坐标行左上方
+    const score=(minX-pcx)+(minY-pcy);       // 曼哈顿距离，越近越像被悬停
+    if(score<bestScore){ bestScore=score; bestIdx=i; }
   }
-  if(col<0||row<0||row>3||col>4) return -1;
-  return row*5+col;
+  if(bestIdx<0) return -1;
+  const p=state.bt.iconPositions[bestIdx];
+  const cw=g.w/5, ch=g.h/4;
+  const c=Math.floor((p.x + state.bt.iconWActual/2 - g.x)/cw);
+  const r=Math.floor((p.y + state.bt.iconHActual/2 - g.y)/ch);
+  if(r<0||r>3||c<0||c>4) return -1;
+  return r*5+c;
 }
 
 /* ===================== 藏宝图：渲染 + 排序 ===================== */
@@ -1565,10 +1653,11 @@ async function baotuLoop(){
       }
     }
     let cnt=state.bt.hasMap.filter(Boolean).length;
-    // 3. 坐标映射：tooltip 在被悬停格子右下方，被悬停格子 = 坐标行 bbox 左上角上方、x 最接近的宝图格子
+    // 3. 坐标映射：优先用暖白高亮检测被悬停格子（可靠、无 tooltip 偏移），兜底用坐标行 bbox 反推
     let cell=-1;
     if(cr && cr.coord && (cr.coord.name || cr.coord.x>0 || cr.coord.y>0)){
-      cell=coordToCell(cr.minX, cr.minY);
+      cell=detectHighlight(frame);
+      if(cell<0){ cell=coordToCell(cr.minX, cr.minY); }
       if(cell>=0 && state.bt.hasMap[cell]){
         const ex=state.bt.coords[cell];
         if(!ex || ex.x!==cr.coord.x || ex.y!==cr.coord.y || ex.name!==cr.coord.name){
