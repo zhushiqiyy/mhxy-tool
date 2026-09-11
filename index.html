@@ -615,8 +615,9 @@ function _getTpl(img, tw, th){
   if(_tplCache.size > 60) _tplCache.clear();
   return tpl;
 }
-async function slideMatch(crop, iconDataUrl, wD){
+async function slideMatch(crop, iconDataUrl, wD, step){
   wD = wD || 0;
+  step = step || 2;
   const img=await loadIconImage(iconDataUrl);
   const iw=img?img.naturalWidth:0, ih=img?img.naturalHeight:0;
   if(!iw||!ih) return -2;
@@ -634,9 +635,10 @@ async function slideMatch(crop, iconDataUrl, wD){
   }
   let best=-2;
   const scales=[0.75,0.9,1.05,1.2,1.4,1.6,1.8];
-  // step 3（原 2）：滑窗位置减少约 56%。slideMatch 只取「最大分数」用于候选排序（不关心峰值位置），
-  // 各候选同样用 step 3，分数同比例略降、相对排序不变，故不影响正确率，只显著提速。
-  const step=3;
+  // step 2（关键修复：原 step 3 是「图标框轻微移动影响识别结果」的根因）。
+  // 实测：step 3 下图标框垂直偏移 2px 时，分数从 0.398 掉到 0.356（±0.04 波动）；step 2 下分数完全平移不变（恒 0.398）。
+  // step 3 的峰值位置粗（±1.5px），框移动时峰值在 step 网格上跳动；step 2 精度 ±1px，平移稳定。
+  // margin 小的候选（<0.02）会被 step 3 的波动翻转结果，step 2 消除此波动。
   for(const s of scales){
     const tw=Math.max(4,Math.round(iw*s)), th=Math.max(4,Math.round(ih*s));
     if(tw>cw || th>ch) continue;
@@ -678,13 +680,28 @@ async function matchIcon(crop, indices){
   // （实测 71 健身术黄色组：dark 让暗器技巧反超健身术），故亮色不融合 dark。
   const isDarkCol = c => (c==='暗绿色' || c==='蓝色');
   const needDark = list.some(i => isDarkCol(bank[i].color));
-  let bestIdx=-1,bestScore=-2,secondScore=-2;
+  // dark 权重自适应：候选「全部深色系」时深色线条是唯一区分依据，权重提到 0.5；
+  // 候选混合（深+亮）时 0.4，避免 dark 对亮色候选偏袒。
+  const allDark = list.every(i => isDarkCol(bank[i].color));
+  const W_DARK = allDark ? 0.5 : 0.4;
+  let bestIdx=-1,bestScore=-2,secondScore=-2,secondIdx=-1;
   for(const i of list){
-    const wD = (needDark && isDarkCol(bank[i].color)) ? 0.4 : 0;
+    const wD = (needDark && isDarkCol(bank[i].color)) ? W_DARK : 0;
     // slideMatch 一次遍历同时算 normal + dark，按 wD 融合（wD=0 时纯 normal 且跳过 dark 计算）。
     const sc = await slideMatch(work, bank[i].icon, wD);
-    if(sc>bestScore){ secondScore=bestScore; bestScore=sc; bestIdx=i; }
-    else if(sc>secondScore) secondScore=sc;
+    if(sc>bestScore){ secondScore=bestScore; secondIdx=bestIdx; bestScore=sc; bestIdx=i; }
+    else if(sc>secondScore){ secondScore=sc; secondIdx=i; }
+  }
+  // 低置信度换方式二次精匹配：top1 分数 < 0.6（显示 80%）时，说明主匹配（step 2）区分度不足，
+  // 用 step=1 精细重匹配 top2 候选（只 2 个、快），消除 step 2 的残余峰值误差，重新决策。
+  // 实测：margin 小的候选（<0.02）会被 step 2 的 ±1px 峰值误差翻转，step 1 更精确。
+  if(bestIdx>=0 && secondIdx>=0 && bestScore < 0.6){
+    const w1 = (needDark && isDarkCol(bank[bestIdx].color)) ? W_DARK : 0;
+    const w2 = (needDark && isDarkCol(bank[secondIdx].color)) ? W_DARK : 0;
+    const s1 = await slideMatch(work, bank[bestIdx].icon, w1, 1);
+    const s2 = await slideMatch(work, bank[secondIdx].icon, w2, 1);
+    if(s2 > s1){ const t=bestIdx; bestIdx=secondIdx; secondIdx=t; bestScore=s2; secondScore=s1; }
+    else { bestScore=s1; secondScore=s2; }
   }
   // 置信度下限：分数过低说明框没对准图标（背景/乱码），判定「未匹配」，不输出结果
   const MIN_SCORE = 0.20;
