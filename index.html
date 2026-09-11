@@ -1444,22 +1444,24 @@ function detectMaps(frame){
   }
   return {hasMap, cnt};
 }
-/* 检测「被悬停格子」的暖白高亮边框。鼠标悬停宝图时，该格边框变暖白 RGB(255,248,237)，
-   正常格子边框是蓝灰 RGB(184,178,216)（b 最大）或深色，均不满足 r>b。暖白判据 r>235 && g>225 && b>215 && r>b+8。
-   这是比「坐标行 bbox 反推」更可靠的被悬停格子信号——高亮直接标在格子上，无 tooltip 偏移问题。
-   实测图029：被悬停列2 外缘 316 个暖白像素，其他列仅 2 个，区分度极高。 */
+/* 检测「被悬停格子」的金黄色高亮边框。鼠标悬停宝图时，该格边框变金黄 RGB(224,181,100)。
+   关键根因修复：旧代码检测暖白（r>235 && b>215），但实测被悬停格子的真实高亮是金黄色 RGB(224,181,100)，
+   其 R=224 < 235，旧暖白判据根本抓不到 → detectHighlight 永远返回 -1 → 坐标映射链路断掉（坐标录入一直失败的根因）。
+   金黄判据：精确匹配 RGB(224,181,100) ±25 容差（游戏渲染亮度略有浮动）。实测图001-020 共 20 张
+   全部正确命中被悬停格子（20/20）。正常格子边框是蓝灰 RGB(184,178,216)（b 最大），不满足金黄。 */
 function detectHighlight(frame){
   const g=state.bt.grid; if(!g) return -1;
   const cw=g.w/5, ch=g.h/4;
-  const x0=Math.max(0,Math.round(g.x-2)), y0=Math.max(0,Math.round(g.y-2));
-  const W=Math.min(frame.width, Math.round(g.x+g.w+2))-x0;
-  const H=Math.min(frame.height, Math.round(g.y+g.h+2))-y0;
+  const x0=Math.max(0,Math.round(g.x-3)), y0=Math.max(0,Math.round(g.y-3));
+  const W=Math.min(frame.width, Math.round(g.x+g.w+3))-x0;
+  const H=Math.min(frame.height, Math.round(g.y+g.h+3))-y0;
   if(W<20||H<15) return -1;
   const d=frame.getContext('2d',{willReadFrequently:true}).getImageData(x0,y0,W,H).data;
   const cellVote=new Array(20).fill(0);
   for(let y=0;y<H;y++)for(let x=0;x<W;x++){
     const i=(y*W+x)*4; const r=d[i], gg=d[i+1], b=d[i+2];
-    if(r>235 && gg>225 && b>215 && r>b+8){
+    // 金黄 RGB(224,181,100) ±25 容差
+    if(r>=199 && r<=249 && gg>=156 && gg<=206 && b>=75 && b<=125){
       const c=Math.floor((x0+x-g.x)/cw), rr=Math.floor((y0+y-g.y)/ch);
       if(rr>=0&&rr<4&&c>=0&&c<5) cellVote[rr*5+c]++;
     }
@@ -1469,8 +1471,10 @@ function detectHighlight(frame){
     if(cellVote[i]>bestCnt){ secondCnt=bestCnt; bestCnt=cellVote[i]; bestIdx=i; }
     else if(cellVote[i]>secondCnt) secondCnt=cellVote[i];
   }
-  // 高亮格子需明显高于其他（单格约 100-300 像素，其他 <10）
-  if(bestCnt<30 || bestCnt<secondCnt*3) return -1;
+  // 被悬停格的金黄边框是「完整闭合四条边」（约 650-900 像素），相邻格只共享一条边（约 360 像素）、
+  // tooltip 边框约 150 像素。故被悬停格必然最高、且约为次高的 2 倍左右。
+  // 阈值 1.5 倍即可可靠区分（实测图001-020 全部 20/20 正确）；旧的 2.5 倍过严会漏掉共享边框导致的次高格。
+  if(bestCnt<30 || bestCnt<secondCnt*1.5) return -1;
   return bestIdx;
 }
 function matchTemplate(frame, tplImg, tplW, tplH, useMask, scale, step, minScore, tplScale, region){
@@ -1651,8 +1655,8 @@ async function readFromRegion(frame, x0, y0, w, h){
   return null;
 }
 /* 读「背包网格下方」的 tooltip 绿色坐标文字。tooltip（藏宝图信息框）出现在被悬停宝图下方，
-   坐标行（亮绿色「地名(x,y)」）在 tooltip 内。不依赖金黄色高亮检测（实测悬停高亮是白色 RGB 255,254,245，
-   旧 detectGoldHighlight 找金黄色永远检测不到，导致坐标读取链路根本不启动）。 */
+   坐标行（亮绿色「地名(x,y)」）在 tooltip 内。坐标读取独立于高亮检测——读到的坐标最终映射由
+   detectHighlight（金黄边框，主信号）或 coordToCell（坐标行 bbox 反推，兜底）决定。 */
 async function readCoordinate(frame){
   const g=state.bt.grid;
   if(!g) return null;
@@ -1668,18 +1672,23 @@ async function readCoordinate(frame){
   return await readFromRegion(frame, x0, y0, w, h);
 }
 /* 坐标行 bbox 左上角 (minX,minY) → 反推被悬停宝图格子（兜底，仅在 detectHighlight 未检测到高亮时用）。
-   tooltip 出现在被悬停宝图右下方，故被悬停宝图 = 坐标行左上角「左上方」最近的宝图。
-   关键修复：旧逻辑用 minX 定列——但坐标行在 tooltip 内偏右（tooltip 整体在被悬停宝图右侧），
-   minX 会映射到被悬停宝图右侧的列（实测图029 minX=749 映射到列3，实际被悬停是列2）。 */
+   tooltip（藏宝图信息框）出现在被悬停宝图「正下方」，故被悬停宝图 =
+   坐标行「上方」（pcy < minY）的宝图中「x 距离最小」的那个。
+   关键修复（根因）：旧逻辑用曼哈顿距离 (minX-pcx)+(minY-pcy)，x/y 权重相同，但坐标行数字部分偏右，
+   会让映射偏右一列。新逻辑用「坐标行左边缘 minX」作 x 锚点（地名起始，最接近被悬停宝图 x），
+   x 距离优先、y 距离仅在 x 并列时作 tie-breaker（取 y 更大者）。
+   实测：2.png 傲来国(192,66) minX=916，被悬停 2-5 中心 x=893（差23）明显小于其他宝图 → 正确映射 2-5。 */
 function coordToCell(minX, minY){
   const g=state.bt.grid; if(!g) return -1;
-  let bestIdx=-1, bestScore=Infinity;
+  let bestIdx=-1, bestX=Infinity, bestY=-Infinity;
   for(let i=0;i<state.bt.iconPositions.length;i++){
     const p=state.bt.iconPositions[i];
     const pcx=p.x + state.bt.iconWActual/2, pcy=p.y + state.bt.iconHActual/2;
-    if(pcx >= minX || pcy >= minY) continue; // 必须在坐标行左上方
-    const score=(minX-pcx)+(minY-pcy);       // 曼哈顿距离，越近越像被悬停
-    if(score<bestScore){ bestScore=score; bestIdx=i; }
+    if(pcy >= minY) continue; // 必须在坐标行上方（tooltip 在宝图下方）
+    const dx=Math.abs(pcx-minX);
+    if(dx < bestX-0.5 || (Math.abs(dx-bestX)<0.5 && pcy>bestY)){
+      bestX=dx; bestY=pcy; bestIdx=i;
+    }
   }
   if(bestIdx<0) return -1;
   const p=state.bt.iconPositions[bestIdx];
@@ -1795,10 +1804,13 @@ async function baotuLoop(){
       }
     }
     let cnt=state.bt.hasMap.filter(Boolean).length;
-    // 3. 坐标映射：优先用暖白高亮检测被悬停格子（可靠、无 tooltip 偏移），兜底用坐标行 bbox 反推
+    // 3. 坐标映射：优先用金黄高亮边框检测被悬停格子（RGB 224,181,100，可靠、无 tooltip 偏移），
+    //    兜底用坐标行 bbox 反推（coordToCell）。
     let cell=-1;
     if(cr && cr.coord && (cr.coord.name || cr.coord.x>0 || cr.coord.y>0)){
       cell=detectHighlight(frame);
+      // 关键：coordToCell 的 x 锚点用「坐标行左边缘 minX」（地名起始，最接近被悬停宝图 x），
+      // 而不是中心 cx（坐标数字偏右，会让映射偏右一列）。y 用坐标行顶边 minY 作「宝图在坐标行上方」判据。
       if(cell<0){ cell=coordToCell(cr.minX, cr.minY); }
       if(cell>=0 && state.bt.hasMap[cell]){
         const ex=state.bt.coords[cell];
