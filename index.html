@@ -619,7 +619,6 @@ async function slideMatch(crop, iconDataUrl, step){
     const tpl=_getTpl(img, tw, th);  // 模板预缓存（不随帧变）
     const {tv, tn} = tpl;
     const N=tw*th;
-    let row=0;
     for(let y=0;y+th<=ch;y+=step){
       for(let x=0;x+tw<=cw;x+=step){
         // normal NCC（RGB，不 mask）
@@ -629,12 +628,12 @@ async function slideMatch(crop, iconDataUrl, step){
         const sc=(snN>1e-6&&tn>0)?covN/(Math.sqrt(snN)*tn):0;
         if(sc>best) best=sc;
       }
-      // 关键：滑窗 NCC 是同步密集计算（4 层循环），一次性算完会阻塞主线程几十~几百 ms，
-      // 表现为「识别出答案瞬间鼠标卡顿、红框跳转不流畅」。每处理 8 行让出一次主线程，
-      // 让浏览器有机会处理鼠标移动（mousemove）和渲染（requestAnimationFrame），消除卡顿感。
-      // 总计算量不变、结果不变，只是拆成多个宏任务执行。
-      if((++row & 7)===0) await new Promise(r=>setTimeout(r,0));
     }
+    // 关键：滑窗 NCC 是同步密集计算，一次性算完会阻塞主线程几十~几百 ms（鼠标卡顿、红框跳转不流畅）。
+    // 每处理完一个尺度让出一次主线程（而非每 8 行让出），既消除卡顿感，又大幅减少 setTimeout 次数
+    // （setTimeout 有约 4ms 最小延迟，每 8 行让出会让总耗时被大量 4ms 延迟累加——「停顿有点长」的根源）。
+    // 每尺度约 5~20ms 计算，单次阻塞短、无卡顿感；4 候选×7 尺度约 28 次让出，总额外延迟可控。
+    await new Promise(r=>setTimeout(r,0));
   }
   return best;
 }
@@ -680,15 +679,25 @@ function binaryShape(pixels, alphaData, S){
   for(let i=0;i<w*h;i++){ if(valid[i]) vals.push(lum[i]); }
   vals.sort((a,b)=>a-b);
   const thr=vals[Math.max(0, Math.floor(vals.length*0.45))];
+  // 关键修复：先裁出「深色形状的包围盒」再等比缩放居中，而不是直接对整幅等比缩放。
+  // 旧逻辑直接对完整 w×h 等比缩放居中——图标在框里偏一点（框没对准），深色形状在 48×48 里也偏，
+  // 与居中的模板形状失配，深色形状 NCC 分数下降，导致「图标框轻微移动才识别准」。
+  // 裁 bbox 后，图标在框内任意位置（只要不超出框），深色形状都归一化到同一位置，平移不变。
+  let minX=w, minY=h, maxX=0, maxY=0;
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    if(valid[y*w+x] && lum[y*w+x]<thr){ if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y; }
+  }
+  if(maxX<minX || maxY<minY) return null;
+  const bw=maxX-minX+1, bh=maxY-minY+1;
   // 等比缩放居中（最近邻采样）
-  const sc=Math.min(S/w, S/h);
-  const dw=Math.max(1, Math.round(w*sc)), dh=Math.max(1, Math.round(h*sc));
+  const sc=Math.min(S/bw, S/bh);
+  const dw=Math.max(1, Math.round(bw*sc)), dh=Math.max(1, Math.round(bh*sc));
   const out=new Float32Array(S*S);
   const ox=(S-dw)>>1, oy=(S-dh)>>1;
   for(let yy=0; yy<dh; yy++){
-    const sy=Math.min(h-1, Math.floor(yy/sc));
+    const sy=minY + Math.min(bh-1, Math.floor(yy/sc));
     for(let xx=0; xx<dw; xx++){
-      const sx=Math.min(w-1, Math.floor(xx/sc));
+      const sx=minX + Math.min(bw-1, Math.floor(xx/sc));
       if(valid[sy*w+sx] && lum[sy*w+sx]<thr) out[(oy+yy)*S+(ox+xx)]=1;
     }
   }
@@ -1020,16 +1029,20 @@ async function autoLocateJieri(){
       for(const i of indices){
         const img=await loadIconImage(bank[i].icon);   // 复用图标缓存，避免每次定位重新加载图片（卡顿来源）
         const iw=img?img.naturalWidth:0, ih=img?img.naturalHeight:0; if(!iw) continue;
-        for(const s of [1.2,1.5,1.8,2.2,2.8]){
+        // 尺度覆盖全谱：大图标在游戏里的渲染尺寸随技能模板尺寸和窗口缩放变化，实测约 scale 0.7~2.8
+        // （森罗万象等小模板图标需 scale<1.2，旧档位 [1.2..2.8] 覆盖不到导致定位失败）。
+        for(const s of [0.7,0.9,1.1,1.3,1.6,2.0,2.5]){
           const m=matchTemplate(frame,img,iw,ih,false,0.5,3,0.45,s,region);
           if(m){
             const w=Math.round(iw*s), h=Math.round(ih*s);
-            // 关键修复：选「底部最靠下」的匹配（y+h 最大），而非 score 最高。
-            // 正确答案的模板与大图标完全重合，匹配到真实底部；错误候选匹配到大图标上半部分（底部偏上）。
-            // 旧逻辑选 score 最高，会选到偏上的错误候选——实测 90.png 雾杀 0.537(底654) vs 佛法无边 0.493(底665)，
-            // 选雾杀导致框偏上、大图标下半部分（佛法无边的关键深色特征）被裁掉，误识别成韦陀护法。
-            // 选底部最靠下则命中佛法无边；4 个样本（90/86/87/89）全部命中正确答案。
-            if(!best || (m.y+h) > (best.y+best.h)){ best={i, score:m.score, x:m.x, y:m.y, s, w, h}; }
+            // 关键修复：score 优先、底部作 tie-breaker。
+            // 旧「底部最靠下」在底部仅差 1px 时会误选低分候选（95.png 断岳势底654 vs 腾雷底653，
+            // 断岳势 score 0.575 却因底多 1px 反超腾雷 0.757）；旧「score 最高」在分数接近时会选到
+            // 偏上的错误候选（90.png 雾杀 0.537 vs 佛法无边 0.493，雾杀偏上 11px）。
+            // 正确策略：score 明显更高（差>0.1）则选高分；分数接近（≤0.1）时选底部更靠下的。
+            if(!best){ best={i, score:m.score, x:m.x, y:m.y, s, w, h}; }
+            else if(m.score > best.score + 0.1){ best={i, score:m.score, x:m.x, y:m.y, s, w, h}; }
+            else if(Math.abs(m.score - best.score) <= 0.1 && (m.y+h) > (best.y+best.h)){ best={i, score:m.score, x:m.x, y:m.y, s, w, h}; }
           }
         }
       }
