@@ -599,7 +599,7 @@ function _getTpl(img, tw, th){
   if(_tplCache.size > 60) _tplCache.clear();
   return tpl;
 }
-async function slideMatch(crop, iconDataUrl, step){
+async function slideMatch(crop, iconDataUrl, step, scaleHint){
   step = step || 2;
   const img=await loadIconImage(iconDataUrl);
   const iw=img?img.naturalWidth:0, ih=img?img.naturalHeight:0;
@@ -608,11 +608,15 @@ async function slideMatch(crop, iconDataUrl, step){
   if(cw<8||ch<8) return -2;
   const cdata=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,cw,ch).data;
   let best=-2;
-  const scales=[0.75,0.9,1.05,1.2,1.4,1.6,1.8];
+  // 关键提速：尺度动态估算（3 档），替代固定 7 档。
+  // 图标框由 autoLocateJieri 候选匹配定位（框=图标×1.25，故图标约占 crop 的 80%），
+  // 因此真实 scale ≈ crop宽×0.8 / 模板宽，是确定的。只需在该值附近 ±20% 搜 3 档即可，
+  // 不必全谱 [0.75..1.8] 扫 7 档（旧方案 4 候选×7 尺度=28 次滑窗，是「出答案慢」的主因之一）。
+  // scaleHint：调用方（matchIcon）传入的估算 scale；缺省时用 cw*0.8/iw 自动估算。
+  const est = scaleHint && scaleHint>0 ? scaleHint : (cw*0.8/iw);
+  const scales=[Math.max(0.7, est*0.85), est, Math.min(2.8, est*1.2)].filter((v,i,a)=>a.indexOf(v)===i);
   // step 2（关键修复：原 step 3 是「图标框轻微移动影响识别结果」的根因）。
-  // 实测：step 3 下图标框垂直偏移 2px 时，分数从 0.398 掉到 0.356（±0.04 波动）；step 2 下分数完全平移不变（恒 0.398）。
-  // step 3 的峰值位置粗（±1.5px），框移动时峰值在 step 网格上跳动；step 2 精度 ±1px，平移稳定。
-  // margin 小的候选（<0.02）会被 step 3 的波动翻转结果，step 2 消除此波动。
+  // step 2 精度 ±1px，平移稳定；margin 小的候选不会被峰值波动翻转。
   for(const s of scales){
     const tw=Math.max(4,Math.round(iw*s)), th=Math.max(4,Math.round(ih*s));
     if(tw>cw || th>ch) continue;
@@ -629,12 +633,11 @@ async function slideMatch(crop, iconDataUrl, step){
         if(sc>best) best=sc;
       }
     }
-    // 关键：滑窗 NCC 是同步密集计算，一次性算完会阻塞主线程几十~几百 ms（鼠标卡顿、红框跳转不流畅）。
-    // 每处理完一个尺度让出一次主线程（而非每 8 行让出），既消除卡顿感，又大幅减少 setTimeout 次数
-    // （setTimeout 有约 4ms 最小延迟，每 8 行让出会让总耗时被大量 4ms 延迟累加——「停顿有点长」的根源）。
-    // 每尺度约 5~20ms 计算，单次阻塞短、无卡顿感；4 候选×7 尺度约 28 次让出，总额外延迟可控。
-    await new Promise(r=>setTimeout(r,0));
   }
+  // 让出主线程：3 个尺度一次算完约 10~30ms，单次阻塞短、无卡顿感。
+  // 不再逐尺度 setTimeout（那会因 4ms 最小延迟把总耗时拖长——「出答案慢」的另一个根源），
+  // 改为整个候选算完让出一次，既消除卡顿又不显著拖慢。
+  await new Promise(r=>setTimeout(r,0));
   return best;
 }
 /* 固定居中的「深色形状」NCC：把 crop 与模板都用「相对亮度 45% 分位」二值化成深/浅形状，
@@ -726,34 +729,42 @@ async function matchIcon(crop, indices){
   }
   // 只在这些候选里匹配（四个选项）；调用方保证 indices 非空，此处仍做兜底
   const list = indices && indices.length ? indices : state.templates.map((_,i)=>i);
-  // 深色增强只对「深色系」候选（暗绿/蓝，占 91%）生效；亮色系（黄/亮绿）纯 normal。
-  // 深色系图标主体颜色相近、靠深色线条区分，dark 有效；亮色系深色元素少，dark 会偏袒深色元素多的候选
-  // （实测 71 健身术黄色组：dark 让暗器技巧反超健身术），故亮色不融合 dark。
-  const isDarkCol = c => (c==='暗绿色' || c==='蓝色');
+  // 深色形状辅助只对「有深色元素的色系」生效：暗绿、蓝、黄。
+  // 黄色系（技能实为橙棕色调，深色占比 0.5~0.7）同样靠深色形状区分——全技能测试实测：
+  // 中医药理/健身术/冥想/巧匠之术/熔炼技巧 5 个黄色技能纯 normal 互相混淆（top1 全错），
+  // 加深色形状后全部修复（0.25 权重即 5/5 正确）。旧结论「黄色系 dark 帮倒忙」是过时误判
+  // （当时用的是旧深色灰度，现为相对亮度二值化深色形状，对黄色同样有效）。
+  // 亮绿色（14 个）纯 normal 已全对、加 shape 无害，故不纳入（避免额外计算）。
+  const isDarkCol = c => (c==='暗绿色' || c==='蓝色' || c==='黄色');
   const needDark = list.some(i => isDarkCol(bank[i].color));
   // 深色形状权重自适应：候选「全部深色系」时深色形状是唯一区分依据，权重 0.35；
   // 候选混合（深+亮）时 0.25，避免深色形状对亮色候选偏袒。
   // 实测（6 个难样本）：w=0.25~0.35 时修复佛法无边（4/6→5/6）且不破坏任何已正确技能；w=0.5 会破坏金刚护身/勘察令。
   const allDark = list.every(i => isDarkCol(bank[i].color));
   const W_DARK = allDark ? 0.35 : 0.25;
-  let bestIdx=-1,bestScore=-2,secondScore=-2,secondIdx=-1;
-  for(const i of list){
-    // normal 匹配（滑窗，定位 + 主判别）
+  // 关键提速：候选并行匹配（Promise.all）。每个候选独立计算 normal + 深色形状，无依赖关系。
+  // 旧代码 for 循环串行 await，4 个候选依次等 slideMatch（每个内部还有 setTimeout 让出），
+  // 串行累计延迟是「出答案慢」的主因之一。并行后 4 个候选同时发起，总耗时≈单个候选×并发开销。
+  const results = await Promise.all(list.map(async (i)=>{
     let fin = await slideMatch(work, bank[i].icon);
-    // 深色形状辅助（固定居中 NCC）：仅对深色系候选融合，区分「主体颜色相近、深色线条形状不同」的技能
     if(needDark && isDarkCol(bank[i].color)){
       const sh = await shapeNCC(work, bank[i].icon);
       if(sh > -1){ fin = (1-W_DARK)*fin + W_DARK*sh; }
     }
-    if(fin>bestScore){ secondScore=bestScore; secondIdx=bestIdx; bestScore=fin; bestIdx=i; }
-    else if(fin>secondScore){ secondScore=fin; secondIdx=i; }
+    return {i, fin};
+  }));
+  let bestIdx=-1,bestScore=-2,secondScore=-2,secondIdx=-1;
+  for(const r of results){
+    if(r.fin>bestScore){ secondScore=bestScore; secondIdx=bestIdx; bestScore=r.fin; bestIdx=r.i; }
+    else if(r.fin>secondScore){ secondScore=r.fin; secondIdx=r.i; }
   }
   // 低置信度换方式二次精匹配：top1 分数 < 0.6（显示 80%）时，说明主匹配（step 2）区分度不足，
   // 用 step=1 精细重匹配 top2 候选（只 2 个、快），消除 step 2 的残余峰值误差，重新决策。
-  // 实测：margin 小的候选（<0.02）会被 step 2 的 ±1px 峰值误差翻转，step 1 更精确。
   if(bestIdx>=0 && secondIdx>=0 && bestScore < 0.6){
-    const s1 = await slideMatch(work, bank[bestIdx].icon, 1);
-    const s2 = await slideMatch(work, bank[secondIdx].icon, 1);
+    const [s1, s2] = await Promise.all([
+      slideMatch(work, bank[bestIdx].icon, 1),
+      slideMatch(work, bank[secondIdx].icon, 1),
+    ]);
     if(s2 > s1){ const t=bestIdx; bestIdx=secondIdx; secondIdx=t; bestScore=s2; secondScore=s1; }
     else { bestScore=s1; secondScore=s2; }
   }
@@ -1141,7 +1152,7 @@ function renderOptions(details,correctName,hitIndex){ const list=$('opt-list'); 
     const txt=document.createElement('span'); txt.textContent='“'+(d.raw?d.raw:'—')+'” → '+(d.dict||'?')+' ('+Math.round((typeof d.final==='number'?d.final:d.s)*100)+'%)';
     div.appendChild(txt); list.appendChild(div); } }
 let autoTimer=null;
-function toggleAuto(){ state.autoMode=$('auto-toggle').checked; if(state.autoMode){ autoTimer=setInterval(()=>recognize(false),900); } else{ clearInterval(autoTimer); } }
+function toggleAuto(){ state.autoMode=$('auto-toggle').checked; if(state.autoMode){ autoTimer=setInterval(()=>recognize(false),450); } else{ clearInterval(autoTimer); } }
 
 /* ===================== 藏宝图：自动定位背包格子 ===================== */
 function downsampleData(frame, scale){
