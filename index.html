@@ -572,17 +572,13 @@ function loadIconImage(src){
     img.src=src;
   });
 }
-/* 滑窗匹配：一次遍历同时计算「normal RGB NCC」和「深色增强 NCC」。
-   深色增强 = 深色灰度 max(0,128-lum) 的 masked NCC，比较图标深色线条/形状的空间分布。
-   wD（dark 权重）由调用方按候选颜色决定：深色系（暗绿/蓝）传 0.4，亮色系（黄/亮绿）传 0。
-   深色增强只对深色系候选生效——深色系图标（暗绿/蓝，占 91%）主体颜色相近、靠深色线条区分；
-   亮色系图标深色元素少，dark 会偏袒深色元素多的候选（实测健身术黄色组被暗器技巧反超），故亮色纯 normal。
-   关键：normal 与 dark 合并到同一遍历（替代原来 slideMatch + slideMatchDark 两次滑窗），且 wD=0 时
-   完全跳过 dark 计算，速度不降反升。尺度覆盖模板全谱 0.75~1.8，全框搜索（平移不变），一次性决策不跳转。 */
-/* 模板预缓存：模板数据（normal 的 tv/tn、dark 的 tmask/dnv/dtn）只依赖 img + 缩放尺寸，不随帧变。
+/* 滑窗匹配：normal RGB NCC（不 mask）。尺度覆盖模板全谱 0.75~1.8，全框搜索（平移不变）。
+   step 2：step 3 会因峰值位置粗（±1.5px）导致图标框轻微移动时分数波动、翻转 margin 小的候选。 */
+/* 模板预缓存：模板数据（normal 的 tv/tn）只依赖 img + 缩放尺寸，不随帧变。
    旧代码每帧对每个候选的每个尺度都重复 drawImage + getImageData + 归一化，是识别卡顿的主因。
    缓存后每帧只做滑窗 NCC（真正随帧变的部分），识别耗时大幅下降。 */
-const _tplCache = new Map(); // Image -> Map('twxth' -> {tv,tn,tmask,dnv,dtn,mn})
+const _tplCache = new Map(); // Image -> Map('twxth' -> {tv,tn})
+const _shapeCache = new Map(); // Image -> Map(S -> Float32Array 深色形状)
 function _getTpl(img, tw, th){
   let m = _tplCache.get(img);
   if(!m){ m = new Map(); _tplCache.set(img, m); }
@@ -597,26 +593,13 @@ function _getTpl(img, tw, th){
   const tv=new Float32Array(N*3); let tn=0;
   for(let i=0;i<N;i++){ for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; } }
   tn=Math.sqrt(tn);
-  // dark 模板：alpha mask（排除透明背景）+ 深色灰度 + 归一化
-  const tmask=new Uint8Array(N); const tdv=new Float32Array(N); let mn=0;
-  for(let i=0;i<N;i++){
-    if(td[i*4+3]>40){
-      const lum=0.299*td[i*4]+0.587*td[i*4+1]+0.114*td[i*4+2];
-      tdv[i]=Math.max(0, 128-lum); tmask[i]=1; mn++;
-    }
-  }
-  let dtm=0; for(let i=0;i<N;i++){ if(tmask[i]) dtm+=tdv[i]; } dtm=(mn>0)?(dtm/mn):0;
-  const dnv=new Float32Array(N); let dtn=0;
-  for(let i=0;i<N;i++){ if(tmask[i]){ const v=tdv[i]-dtm; dnv[i]=v; dtn+=v*v; } }
-  dtn=Math.sqrt(dtn);
-  const tpl = {tv, tn, tmask, dnv, dtn, mn};
+  const tpl = {tv, tn};
   m.set(key, tpl);
   // 限制缓存规模：技能多达 320 个，长期运行会累积；超过阈值清空（LRU 简化版）
   if(_tplCache.size > 60) _tplCache.clear();
   return tpl;
 }
-async function slideMatch(crop, iconDataUrl, wD, step){
-  wD = wD || 0;
+async function slideMatch(crop, iconDataUrl, step){
   step = step || 2;
   const img=await loadIconImage(iconDataUrl);
   const iw=img?img.naturalWidth:0, ih=img?img.naturalHeight:0;
@@ -624,15 +607,6 @@ async function slideMatch(crop, iconDataUrl, wD, step){
   const cw=crop.width, ch=crop.height;
   if(cw<8||ch<8) return -2;
   const cdata=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,cw,ch).data;
-  // crop 深色灰度（仅 wD>0 时算）
-  let cgray=null;
-  if(wD>0){
-    cgray=new Float32Array(cw*ch);
-    for(let i=0;i<cw*ch;i++){
-      const lum=0.299*cdata[i*4]+0.587*cdata[i*4+1]+0.114*cdata[i*4+2];
-      cgray[i]=Math.max(0, 128-lum);
-    }
-  }
   let best=-2;
   const scales=[0.75,0.9,1.05,1.2,1.4,1.6,1.8];
   // step 2（关键修复：原 step 3 是「图标框轻微移动影响识别结果」的根因）。
@@ -643,27 +617,87 @@ async function slideMatch(crop, iconDataUrl, wD, step){
     const tw=Math.max(4,Math.round(iw*s)), th=Math.max(4,Math.round(ih*s));
     if(tw>cw || th>ch) continue;
     const tpl=_getTpl(img, tw, th);  // 模板预缓存（不随帧变）
-    const {tv, tn, tmask, dnv, dtn, mn} = tpl;
+    const {tv, tn} = tpl;
     const N=tw*th;
     for(let y=0;y+th<=ch;y+=step){ for(let x=0;x+tw<=cw;x+=step){
       // normal NCC（RGB，不 mask）
       let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; sm+=cdata[idx]+cdata[idx+1]+cdata[idx+2]; } sm/=N*3;
       let covN=0,snN=0;
       for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; for(let k=0;k<3;k++){ const sv=cdata[idx+k]-sm; covN+=sv*tv[(j*tw+i)*3+k]; snN+=sv*sv; } }
-      const nccN=(snN>1e-6&&tn>0)?covN/(Math.sqrt(snN)*tn):0;
-      let sc=nccN;
-      // dark NCC（深色灰度，alpha mask）——仅 wD>0
-      if(wD>0){
-        let dsm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]) dsm+=cgray[(y+j)*cw+(x+i)]; } dsm=(mn>0)?(dsm/mn):0;
-        let covD=0,snD=0;
-        for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ if(tmask[j*tw+i]){ const sv=cgray[(y+j)*cw+(x+i)]-dsm; covD+=sv*dnv[j*tw+i]; snD+=sv*sv; } }
-        const nccD=(snD>1e-6&&dtn>0)?covD/(Math.sqrt(snD)*dtn):0;
-        sc=(1-wD)*nccN+wD*nccD;
-      }
+      const sc=(snN>1e-6&&tn>0)?covN/(Math.sqrt(snN)*tn):0;
       if(sc>best) best=sc;
     }}
   }
   return best;
+}
+/* 固定居中的「深色形状」NCC：把 crop 与模板都用「相对亮度 45% 分位」二值化成深/浅形状，
+   等比缩放居中到固定尺寸（48×48）后算皮尔逊相关。
+   深色形状 NCC 对游戏渲染的「整体提亮」稳健（相对阈值而非绝对阈值），
+   用于区分「主体颜色相近、深色线条形状不同」的深色系技能（如佛法无边 vs 指地成钢/火甲术）。
+   实测：模板间深色形状 NCC 1.0 vs 0.05，游戏渲染 crop 佛法无边 0.216 vs 干扰项负值。
+   注意：这里不做滑窗（normal 已定位位置），固定居中即可，且对位置偏移不敏感。 */
+async function shapeNCC(crop, iconDataUrl){
+  const img=await loadIconImage(iconDataUrl);
+  const iw=img?img.naturalWidth:0, ih=img?img.naturalHeight:0;
+  if(!iw||!ih) return -2;
+  const S=48;
+  const cdata=crop.getContext('2d',{willReadFrequently:true}).getImageData(0,0,crop.width,crop.height);
+  const cshape = binaryShape(cdata, null, S);
+  if(!cshape) return -2;
+  const tshape = tplBinaryShape(img, iw, ih, S);
+  if(!tshape) return -2;
+  // 皮尔逊相关
+  let ma=0, mb=0; const n=S*S;
+  for(let i=0;i<n;i++){ ma+=cshape[i]; mb+=tshape[i]; }
+  ma/=n; mb/=n;
+  let cov=0, va=0, vb=0;
+  for(let i=0;i<n;i++){ const a=cshape[i]-ma, b=tshape[i]-mb; cov+=a*b; va+=a*a; vb+=b*b; }
+  return (va>1e-6&&vb>1e-6)?(cov/Math.sqrt(va*vb)):0;
+}
+/* 把 RGBA 像素数组二值化成深色形状（相对亮度 45% 分位），等比缩放居中到 S×S 的一维 Float32Array */
+function binaryShape(pixels, alphaData, S){
+  const w=pixels.width, h=pixels.height;
+  const d=pixels.data;
+  const lum=new Float32Array(w*h);
+  const valid=new Uint8Array(w*h);
+  let fgN=0;
+  for(let i=0;i<w*h;i++){
+    if(d[i*4+3]>40){
+      lum[i]=0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2];
+      valid[i]=1; fgN++;
+    }
+  }
+  if(fgN<10) return null;
+  const vals=[];
+  for(let i=0;i<w*h;i++){ if(valid[i]) vals.push(lum[i]); }
+  vals.sort((a,b)=>a-b);
+  const thr=vals[Math.max(0, Math.floor(vals.length*0.45))];
+  // 等比缩放居中（最近邻采样）
+  const sc=Math.min(S/w, S/h);
+  const dw=Math.max(1, Math.round(w*sc)), dh=Math.max(1, Math.round(h*sc));
+  const out=new Float32Array(S*S);
+  const ox=(S-dw)>>1, oy=(S-dh)>>1;
+  for(let yy=0; yy<dh; yy++){
+    const sy=Math.min(h-1, Math.floor(yy/sc));
+    for(let xx=0; xx<dw; xx++){
+      const sx=Math.min(w-1, Math.floor(xx/sc));
+      if(valid[sy*w+sx] && lum[sy*w+sx]<thr) out[(oy+yy)*S+(ox+xx)]=1;
+    }
+  }
+  return out;
+}
+/* 模板的深色形状（带缓存）：等比缩放居中到 S×S 的一维 Float32Array */
+function tplBinaryShape(img, iw, ih, S){
+  let m = _shapeCache.get(img);
+  if(m && m.has(S)) return m.get(S);
+  if(!m){ m = new Map(); _shapeCache.set(img, m); }
+  const tc=document.createElement('canvas'); tc.width=iw; tc.height=ih;
+  const tg=tc.getContext('2d'); tg.drawImage(img,0,0,iw,ih);
+  const id=tg.getImageData(0,0,iw,ih);
+  const shape = binaryShape(id, null, S);
+  m.set(S, shape);
+  if(_shapeCache.size > 60) _shapeCache.clear();
+  return shape;
 }
 async function matchIcon(crop, indices){
   // 小图标先放大到 96px（整个屏幕共享时大图标仅 40-56px，放大给匹配更多像素、提升区分度与稳定性）
@@ -680,26 +714,29 @@ async function matchIcon(crop, indices){
   // （实测 71 健身术黄色组：dark 让暗器技巧反超健身术），故亮色不融合 dark。
   const isDarkCol = c => (c==='暗绿色' || c==='蓝色');
   const needDark = list.some(i => isDarkCol(bank[i].color));
-  // dark 权重自适应：候选「全部深色系」时深色线条是唯一区分依据，权重提到 0.5；
-  // 候选混合（深+亮）时 0.4，避免 dark 对亮色候选偏袒。
+  // 深色形状权重自适应：候选「全部深色系」时深色形状是唯一区分依据，权重 0.35；
+  // 候选混合（深+亮）时 0.25，避免深色形状对亮色候选偏袒。
+  // 实测（6 个难样本）：w=0.25~0.35 时修复佛法无边（4/6→5/6）且不破坏任何已正确技能；w=0.5 会破坏金刚护身/勘察令。
   const allDark = list.every(i => isDarkCol(bank[i].color));
-  const W_DARK = allDark ? 0.5 : 0.4;
+  const W_DARK = allDark ? 0.35 : 0.25;
   let bestIdx=-1,bestScore=-2,secondScore=-2,secondIdx=-1;
   for(const i of list){
-    const wD = (needDark && isDarkCol(bank[i].color)) ? W_DARK : 0;
-    // slideMatch 一次遍历同时算 normal + dark，按 wD 融合（wD=0 时纯 normal 且跳过 dark 计算）。
-    const sc = await slideMatch(work, bank[i].icon, wD);
-    if(sc>bestScore){ secondScore=bestScore; secondIdx=bestIdx; bestScore=sc; bestIdx=i; }
-    else if(sc>secondScore){ secondScore=sc; secondIdx=i; }
+    // normal 匹配（滑窗，定位 + 主判别）
+    let fin = await slideMatch(work, bank[i].icon);
+    // 深色形状辅助（固定居中 NCC）：仅对深色系候选融合，区分「主体颜色相近、深色线条形状不同」的技能
+    if(needDark && isDarkCol(bank[i].color)){
+      const sh = await shapeNCC(work, bank[i].icon);
+      if(sh > -1){ fin = (1-W_DARK)*fin + W_DARK*sh; }
+    }
+    if(fin>bestScore){ secondScore=bestScore; secondIdx=bestIdx; bestScore=fin; bestIdx=i; }
+    else if(fin>secondScore){ secondScore=fin; secondIdx=i; }
   }
   // 低置信度换方式二次精匹配：top1 分数 < 0.6（显示 80%）时，说明主匹配（step 2）区分度不足，
   // 用 step=1 精细重匹配 top2 候选（只 2 个、快），消除 step 2 的残余峰值误差，重新决策。
   // 实测：margin 小的候选（<0.02）会被 step 2 的 ±1px 峰值误差翻转，step 1 更精确。
   if(bestIdx>=0 && secondIdx>=0 && bestScore < 0.6){
-    const w1 = (needDark && isDarkCol(bank[bestIdx].color)) ? W_DARK : 0;
-    const w2 = (needDark && isDarkCol(bank[secondIdx].color)) ? W_DARK : 0;
-    const s1 = await slideMatch(work, bank[bestIdx].icon, w1, 1);
-    const s2 = await slideMatch(work, bank[secondIdx].icon, w2, 1);
+    const s1 = await slideMatch(work, bank[bestIdx].icon, 1);
+    const s2 = await slideMatch(work, bank[secondIdx].icon, 1);
     if(s2 > s1){ const t=bestIdx; bestIdx=secondIdx; secondIdx=t; bestScore=s2; secondScore=s1; }
     else { bestScore=s1; secondScore=s2; }
   }
