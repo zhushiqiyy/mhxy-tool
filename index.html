@@ -579,6 +579,42 @@ function loadIconImage(src){
    亮色系图标深色元素少，dark 会偏袒深色元素多的候选（实测健身术黄色组被暗器技巧反超），故亮色纯 normal。
    关键：normal 与 dark 合并到同一遍历（替代原来 slideMatch + slideMatchDark 两次滑窗），且 wD=0 时
    完全跳过 dark 计算，速度不降反升。尺度覆盖模板全谱 0.75~1.8，全框搜索（平移不变），一次性决策不跳转。 */
+/* 模板预缓存：模板数据（normal 的 tv/tn、dark 的 tmask/dnv/dtn）只依赖 img + 缩放尺寸，不随帧变。
+   旧代码每帧对每个候选的每个尺度都重复 drawImage + getImageData + 归一化，是识别卡顿的主因。
+   缓存后每帧只做滑窗 NCC（真正随帧变的部分），识别耗时大幅下降。 */
+const _tplCache = new Map(); // Image -> Map('twxth' -> {tv,tn,tmask,dnv,dtn,mn})
+function _getTpl(img, tw, th){
+  let m = _tplCache.get(img);
+  if(!m){ m = new Map(); _tplCache.set(img, m); }
+  const key = tw+'x'+th;
+  if(m.has(key)) return m.get(key);
+  const tc=document.createElement('canvas'); tc.width=tw; tc.height=th;
+  const tg=tc.getContext('2d'); tg.drawImage(img,0,0,tw,th);
+  const td=tg.getImageData(0,0,tw,th).data;
+  const N=tw*th;
+  // normal 模板：RGB 均值 + 归一化（不 mask）
+  let tm=0; for(let i=0;i<N;i++){ tm+=td[i*4]+td[i*4+1]+td[i*4+2]; } tm/=N*3;
+  const tv=new Float32Array(N*3); let tn=0;
+  for(let i=0;i<N;i++){ for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; } }
+  tn=Math.sqrt(tn);
+  // dark 模板：alpha mask（排除透明背景）+ 深色灰度 + 归一化
+  const tmask=new Uint8Array(N); const tdv=new Float32Array(N); let mn=0;
+  for(let i=0;i<N;i++){
+    if(td[i*4+3]>40){
+      const lum=0.299*td[i*4]+0.587*td[i*4+1]+0.114*td[i*4+2];
+      tdv[i]=Math.max(0, 128-lum); tmask[i]=1; mn++;
+    }
+  }
+  let dtm=0; for(let i=0;i<N;i++){ if(tmask[i]) dtm+=tdv[i]; } dtm=(mn>0)?(dtm/mn):0;
+  const dnv=new Float32Array(N); let dtn=0;
+  for(let i=0;i<N;i++){ if(tmask[i]){ const v=tdv[i]-dtm; dnv[i]=v; dtn+=v*v; } }
+  dtn=Math.sqrt(dtn);
+  const tpl = {tv, tn, tmask, dnv, dtn, mn};
+  m.set(key, tpl);
+  // 限制缓存规模：技能多达 320 个，长期运行会累积；超过阈值清空（LRU 简化版）
+  if(_tplCache.size > 60) _tplCache.clear();
+  return tpl;
+}
 async function slideMatch(crop, iconDataUrl, wD){
   wD = wD || 0;
   const img=await loadIconImage(iconDataUrl);
@@ -598,35 +634,15 @@ async function slideMatch(crop, iconDataUrl, wD){
   }
   let best=-2;
   const scales=[0.75,0.9,1.05,1.2,1.4,1.6,1.8];
+  // step 3（原 2）：滑窗位置减少约 56%。slideMatch 只取「最大分数」用于候选排序（不关心峰值位置），
+  // 各候选同样用 step 3，分数同比例略降、相对排序不变，故不影响正确率，只显著提速。
+  const step=3;
   for(const s of scales){
     const tw=Math.max(4,Math.round(iw*s)), th=Math.max(4,Math.round(ih*s));
     if(tw>cw || th>ch) continue;
-    const tc=document.createElement('canvas'); tc.width=tw; tc.height=th;
-    const tg=tc.getContext('2d'); tg.drawImage(img,0,0,tw,th);
-    const td=tg.getImageData(0,0,tw,th).data;
+    const tpl=_getTpl(img, tw, th);  // 模板预缓存（不随帧变）
+    const {tv, tn, tmask, dnv, dtn, mn} = tpl;
     const N=tw*th;
-    // normal 模板：RGB 均值 + 归一化（不 mask）
-    let tm=0; for(let i=0;i<N;i++){ tm+=td[i*4]+td[i*4+1]+td[i*4+2]; } tm/=N*3;
-    const tv=new Float32Array(N*3); let tn=0;
-    for(let i=0;i<N;i++){ for(let k=0;k<3;k++){ const v=td[i*4+k]-tm; tv[i*3+k]=v; tn+=v*v; } }
-    tn=Math.sqrt(tn);
-    // dark 模板（仅 wD>0）：alpha mask + 深色灰度 + 归一化
-    let tmask=null, dnv=null, mn=0, dtn=0;
-    if(wD>0){
-      tmask=new Uint8Array(N); const tdv=new Float32Array(N);
-      for(let i=0;i<N;i++){
-        if(td[i*4+3]>40){
-          const lum=0.299*td[i*4]+0.587*td[i*4+1]+0.114*td[i*4+2];
-          tdv[i]=Math.max(0, 128-lum);
-          tmask[i]=1; mn++;
-        }
-      }
-      let dtm=0; for(let i=0;i<N;i++){ if(tmask[i]) dtm+=tdv[i]; } dtm=(mn>0)?(dtm/mn):0;
-      dnv=new Float32Array(N);
-      for(let i=0;i<N;i++){ if(tmask[i]){ const v=tdv[i]-dtm; dnv[i]=v; dtn+=v*v; } }
-      dtn=Math.sqrt(dtn);
-    }
-    const step=2;
     for(let y=0;y+th<=ch;y+=step){ for(let x=0;x+tw<=cw;x+=step){
       // normal NCC（RGB，不 mask）
       let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; sm+=cdata[idx]+cdata[idx+1]+cdata[idx+2]; } sm/=N*3;
@@ -961,7 +977,11 @@ async function relocateIcon(){ await autoLocateJieri(); }
 /* 计算图标区域像素哈希（降采样到 8×8，灰度量化到 12 级），用于判断题目是否变化。
    量化步长约 64，能容忍视频噪声（同题目轻微抖动不触发重识别），但图标替换时哈希会明显变化 */
 function frameHash(frame, region){
-  const crop=cropRegion(frame, region);
+  let crop=cropRegion(frame, region);
+  // 关键：先 autoTrim 裁掉背景，让哈希只反映「图标内容」，而非「框位置/大小」。
+  // 旧逻辑直接对 icon 区域哈希，识别框轻微移动（边缘像素进出）就会改变哈希 → 触发无效重识别 → 结果抖动。
+  // autoTrim 后图标在框内任意位置、框略移动，裁出的图标内容不变 → 哈希不变 → 题目锁定（一次性识别）。
+  crop=autoTrim(crop);
   const S=8; const c=document.createElement('canvas'); c.width=S; c.height=S;
   const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(crop,0,0,S,S);
   const d=g.getImageData(0,0,S,S).data;
