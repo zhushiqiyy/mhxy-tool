@@ -991,21 +991,28 @@ async function autoLocateJieri(){
       // （实测大图标在提示文字上方/左侧/同一水平线均出现，位置随窗口布局变化）
       const region={ x0:Math.max(0,tip.x0-tipW*0.6), y0:Math.max(0,tip.y0-tipH*4),
                     x1:Math.min(frame.width,tip.x1), y1:Math.min(frame.height,tip.y1+tipH*3) };
-      let best={i:-1,score:-2,x:0,y:0,w:0,h:0,s:1};
+      let best=null;
       for(const i of indices){
-        const img=new Image(); img.src=bank[i].icon;
-        await new Promise(r=>{ img.onload=r; img.onerror=r; });
-        const iw=img.naturalWidth, ih=img.naturalHeight; if(!iw) continue;
+        const img=await loadIconImage(bank[i].icon);   // 复用图标缓存，避免每次定位重新加载图片（卡顿来源）
+        const iw=img?img.naturalWidth:0, ih=img?img.naturalHeight:0; if(!iw) continue;
         for(const s of [1.2,1.5,1.8,2.2,2.8]){
-          const m=matchTemplate(frame,img,iw,ih,false,0.5,3,0.5,s,region);
-          if(m && m.score>best.score){ best.i=i; best.score=m.score; best.x=m.x; best.y=m.y; best.s=s; best.w=Math.round(iw*s); best.h=Math.round(ih*s); }
+          const m=matchTemplate(frame,img,iw,ih,false,0.5,3,0.45,s,region);
+          if(m){
+            const w=Math.round(iw*s), h=Math.round(ih*s);
+            // 关键修复：选「底部最靠下」的匹配（y+h 最大），而非 score 最高。
+            // 正确答案的模板与大图标完全重合，匹配到真实底部；错误候选匹配到大图标上半部分（底部偏上）。
+            // 旧逻辑选 score 最高，会选到偏上的错误候选——实测 90.png 雾杀 0.537(底654) vs 佛法无边 0.493(底665)，
+            // 选雾杀导致框偏上、大图标下半部分（佛法无边的关键深色特征）被裁掉，误识别成韦陀护法。
+            // 选底部最靠下则命中佛法无边；4 个样本（90/86/87/89）全部命中正确答案。
+            if(!best || (m.y+h) > (best.y+best.h)){ best={i, score:m.score, x:m.x, y:m.y, s, w, h}; }
+          }
         }
       }
-      if(best.i>=0) iconLoc=best;
+      if(best) iconLoc=best;
     }
-    if(iconLoc && iconLoc.score>0.55){
+    if(iconLoc){
       // 候选匹配定位成功：图标框设为正方形、略大于图标（四边等距）
-      const pad2=1.2, side=Math.max(iconLoc.w,iconLoc.h)*pad2;
+      const pad2=1.25, side=Math.max(iconLoc.w,iconLoc.h)*pad2;
       const cx=iconLoc.x+iconLoc.w/2, cy=iconLoc.y+iconLoc.h/2;
       const ix0=cx-side/2, iy0=cy-side/2;
       state.regions.icon={ x:clamp(ix0/frame.width,0,1), y:clamp(iy0/frame.height,0,1),
