@@ -619,14 +619,22 @@ async function slideMatch(crop, iconDataUrl, step){
     const tpl=_getTpl(img, tw, th);  // 模板预缓存（不随帧变）
     const {tv, tn} = tpl;
     const N=tw*th;
-    for(let y=0;y+th<=ch;y+=step){ for(let x=0;x+tw<=cw;x+=step){
-      // normal NCC（RGB，不 mask）
-      let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; sm+=cdata[idx]+cdata[idx+1]+cdata[idx+2]; } sm/=N*3;
-      let covN=0,snN=0;
-      for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; for(let k=0;k<3;k++){ const sv=cdata[idx+k]-sm; covN+=sv*tv[(j*tw+i)*3+k]; snN+=sv*sv; } }
-      const sc=(snN>1e-6&&tn>0)?covN/(Math.sqrt(snN)*tn):0;
-      if(sc>best) best=sc;
-    }}
+    let row=0;
+    for(let y=0;y+th<=ch;y+=step){
+      for(let x=0;x+tw<=cw;x+=step){
+        // normal NCC（RGB，不 mask）
+        let sm=0; for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; sm+=cdata[idx]+cdata[idx+1]+cdata[idx+2]; } sm/=N*3;
+        let covN=0,snN=0;
+        for(let j=0;j<th;j++)for(let i=0;i<tw;i++){ const idx=((y+j)*cw+(x+i))*4; for(let k=0;k<3;k++){ const sv=cdata[idx+k]-sm; covN+=sv*tv[(j*tw+i)*3+k]; snN+=sv*sv; } }
+        const sc=(snN>1e-6&&tn>0)?covN/(Math.sqrt(snN)*tn):0;
+        if(sc>best) best=sc;
+      }
+      // 关键：滑窗 NCC 是同步密集计算（4 层循环），一次性算完会阻塞主线程几十~几百 ms，
+      // 表现为「识别出答案瞬间鼠标卡顿、红框跳转不流畅」。每处理 8 行让出一次主线程，
+      // 让浏览器有机会处理鼠标移动（mousemove）和渲染（requestAnimationFrame），消除卡顿感。
+      // 总计算量不变、结果不变，只是拆成多个宏任务执行。
+      if((++row & 7)===0) await new Promise(r=>setTimeout(r,0));
+    }
   }
   return best;
 }
@@ -792,8 +800,11 @@ function maskedNCC(np,t){
 }
 
 /* ===================== 教师节：OCR 选项 ===================== */
-function preprocessForOCR(crop){
-  const w=crop.width,h=crop.height; const scale=Math.min(4,Math.max(2,Math.round(320/Math.max(w,h))));
+function preprocessForOCR(crop, minTarget){
+  // minTarget：目标最短边像素（默认 320）。选项文字小，放大到更大尺寸让 Tesseract 有更多像素识别字形，
+  // 减少「唧唧歪歪→嘿嘿牌垂」这类形近误读（Tesseract 中文识别弱于 PaddleOCR，只能靠放大补救）。
+  const target = minTarget || 320;
+  const w=crop.width,h=crop.height; const scale=Math.min(8,Math.max(2,Math.round(target/Math.max(w,h))));
   const c=document.createElement('canvas'); c.width=w*scale;c.height=h*scale; const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(crop,0,0,c.width,c.height);
   const id=g.getImageData(0,0,c.width,c.height); const px=id.data; const N=c.width*c.height;
   const gray=new Uint8Array(N); const greenI=new Int16Array(N); let sum=0;
@@ -908,7 +919,21 @@ function findAnswer(optionTexts,correctName){
 }
 
 /* ===================== 教师节：识别流程 ===================== */
-async function ocrOptions(frame){ const tasks=[]; for(let i=1;i<=4;i++){ tasks.push(ocrOne(preprocessForOCR(cropRegion(frame,state.regions['opt'+i])))); } return await Promise.all(tasks); }
+async function ocrOptions(frame){
+  const tasks=[]; for(let i=1;i<=4;i++){ tasks.push(ocrOne(preprocessForOCR(cropRegion(frame,state.regions['opt'+i])))); }
+  const texts=await Promise.all(tasks);
+  // 失败选项重读兜底：bestDictMatch 匹配不到字典（score 低，说明 OCR 形近误读，如「唧唧歪歪→嘿嘿牌垂」）的选项，
+  // 用更大放大倍数（target 640）重读一次。这是解决「某个选项 OCR 失败 → 正确候选缺失 → 大图标在残缺候选里误匹配」的关键。
+  // 只对失败选项重读（通常 0~1 个），开销可控。
+  for(let i=0;i<4;i++){
+    const m=bestDictMatch(texts[i]);
+    if(!m.name || m.score < 0.5){
+      const retry=await ocrOne(preprocessForOCR(cropRegion(frame,state.regions['opt'+(i+1)]), 640));
+      if(retry){ const m2=bestDictMatch(retry); if(m2.score > m.score) texts[i]=retry; }
+    }
+  }
+  return texts;
+}
 /* 用候选图标（四个选项的技能名）定位大图标，返回最佳匹配 {index,score,x,y,w,h}。
    在当前 icon 区域外扩范围内搜索（框移动不会太远，限制范围避免误匹配到游戏 UI 别处） */
 async function locateIcon(frame, indices, fullScan){
